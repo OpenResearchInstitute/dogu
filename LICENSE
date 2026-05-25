@@ -1,0 +1,31 @@
+SPDX-License-Identifier: CERN-OHL-S-2.0
+
+Copyright (C) 2026 Open Research Institute and contributors.
+
+This source describes Open Hardware and is licensed under the
+CERN-OHL-S v2.
+
+You may redistribute and modify this source and make products using it
+under the terms of the CERN-OHL-S v2 (https://ohwr.org/cern_ohl_s_v2.txt).
+
+This source is distributed WITHOUT ANY EXPRESS OR IMPLIED WARRANTY,
+INCLUDING OF MERCHANTABILITY, SATISFACTORY QUALITY AND FITNESS FOR
+A PARTICULAR PURPOSE. Please see the CERN-OHL-S v2 for applicable
+conditions.
+
+Source location: <set repository URL once published>
+
+As per CERN-OHL-S v2 section 4, should You produce hardware based on
+this source, You must, where practicable and legally permissible,
+maintain the Notices.
+
+────────────────────────────────────────────────────────────────────────
+
+The full text of the CERN-OHL-S v2 license follows below.
+
+[ Replace this placeholder with the canonical CERN-OHL-S v2 text from
+  https://ohwr.org/cern_ohl_s_v2.txt before publishing the repository.
+
+  The file at that URL is the authoritative license text; copying it
+  here ensures the license travels with the source code per common
+  open-source convention. ]

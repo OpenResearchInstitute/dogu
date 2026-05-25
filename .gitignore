@@ -1,0 +1,30 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.so.*
+*.d
+
+# Compiled binaries
+tools/*/dma_listen
+tools/*/oriinit-cli
+tools/*/csr_dump
+liboriinit/oriinit-cli
+
+# Yocto / OE build output
+yocto/build/
+yocto/tmp/
+
+# Editor and IDE files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
