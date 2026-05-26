@@ -3,7 +3,7 @@
 
 # Subdirectories that have something to build right now.
 # Add to this list as new components come online.
-SUBDIRS := tools/dma_listen
+SUBDIRS := tools/dma_listen liboriinit
 
 .PHONY: all clean install $(SUBDIRS)
 
