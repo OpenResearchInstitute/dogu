@@ -9,14 +9,14 @@ Open Research Institute · CERN-OHL-S v2
 ## What is this?
 
 A collection of ARM-userspace software for ORI radios built around the
-Analog Devices ADRV9001/9002 transceiver — chip-init libraries, diagnostic
-tools, telemetry publishers, and dashboards.
+Analog Devices ADRV9001/9002 transceiver consisting of chip-init libraries, 
+diagnostic tools, telemetry publishers, and dashboards.
 
 Primary platform: ZCU102 + ADRV9002 (Haifuraiya mode-dynamic transponder).
 Secondary platforms: any Linux-on-Zynq or Linux-on-ZynqMP target with an
 ADRV9001/9002, including custom carrier boards.
 
-The name *dōgu* (道具) is Japanese for "tool" or "implement" — a deliberately
+The name *dōgu* (道具) is Japanese for "tool" or "implement", a deliberately
 broad container for the growing collection of pieces that support ORI's
 ADRV-based radios.
 
