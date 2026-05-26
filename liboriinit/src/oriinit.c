@@ -21,16 +21,21 @@
 /* Internal context                                                 */
 /*------------------------------------------------------------------*/
 
-/* The ADRV9002 PHY device exposes 4 channels:
- *   - "voltage0" input  → RX1
- *   - "voltage1" input  → RX2
- *   - "voltage0" output → TX1
- *   - "voltage1" output → TX2
+/* The ADRV9002 PHY device exposes 4 voltage channels plus 4 altvoltage
+ * channels for the local oscillators:
+ *   - "voltage0" input    → RX1            "altvoltage0" output → RX1_LO
+ *   - "voltage1" input    → RX2            "altvoltage1" output → RX2_LO
+ *   - "voltage0" output   → TX1            "altvoltage2" output → TX1_LO
+ *   - "voltage1" output   → TX2            "altvoltage3" output → TX2_LO
+ *
+ * The mapping of altvoltage index → channel happens to be a clean
+ * (RX1, RX2, TX1, TX2) order matching our enum.
  */
 struct oriinit_ctx {
     struct iio_context *iio;
     struct iio_device  *phy;        /* adrv9002-phy */
-    struct iio_channel *ch[ORIINIT_CH_MAX];
+    struct iio_channel *ch[ORIINIT_CH_MAX];     /* voltage* channels */
+    struct iio_channel *lo[ORIINIT_CH_MAX];     /* altvoltage* channels for LO */
 };
 
 /* PHY device name in libiio. */
@@ -47,6 +52,20 @@ static const struct channel_descriptor CHANNEL_DESCRIPTORS[ORIINIT_CH_MAX] = {
     [ORIINIT_CH_RX2] = { "voltage1", false },
     [ORIINIT_CH_TX1] = { "voltage0", true  },
     [ORIINIT_CH_TX2] = { "voltage1", true  },
+};
+
+/* LO altvoltage channels (all output direction). Index matches our
+ * channel enum. Confirmed via iio_info on adrv9002-phy:
+ *   altvoltage0 -> label "RX1_LO"
+ *   altvoltage1 -> label "RX2_LO"
+ *   altvoltage2 -> label "TX1_LO"
+ *   altvoltage3 -> label "TX2_LO"
+ */
+static const char *LO_CHANNEL_NAMES[ORIINIT_CH_MAX] = {
+    [ORIINIT_CH_RX1] = "altvoltage0",
+    [ORIINIT_CH_RX2] = "altvoltage1",
+    [ORIINIT_CH_TX1] = "altvoltage2",
+    [ORIINIT_CH_TX2] = "altvoltage3",
 };
 
 /*------------------------------------------------------------------*/
@@ -99,9 +118,10 @@ oriinit_ctx_t *oriinit_create(const char *iio_uri)
         return NULL;
     }
 
-    /* Look up all four channels. Missing channels are tolerated (some
-     * boards might not have TX2 enabled, for example) — but RX1 must
-     * exist for the library to be useful. */
+    /* Look up all four voltage channels (RX/TX data channels).
+     * Missing channels are tolerated (some boards might not have TX2
+     * enabled, for example) — but RX1 must exist for the library to
+     * be useful. */
     for (int i = 0; i < ORIINIT_CH_MAX; i++) {
         ctx->ch[i] = iio_device_find_channel(ctx->phy,
                                              CHANNEL_DESCRIPTORS[i].name,
@@ -111,6 +131,15 @@ oriinit_ctx_t *oriinit_create(const char *iio_uri)
         iio_context_destroy(ctx->iio);
         free(ctx);
         return NULL;
+    }
+
+    /* Look up the LO altvoltage channels. All four are output direction.
+     * Missing ones are tolerated; we'll just report LO frequency = 0
+     * for those slots. */
+    for (int i = 0; i < ORIINIT_CH_MAX; i++) {
+        ctx->lo[i] = iio_device_find_channel(ctx->phy,
+                                             LO_CHANNEL_NAMES[i],
+                                             true);
     }
 
     return ctx;
@@ -185,13 +214,15 @@ oriinit_status_t oriinit_read_state(oriinit_ctx_t *ctx, oriinit_state_t *out)
         if (read_chan_attr_string(ch, "hardwaregain", buf, sizeof(buf)) == 0) {
             out->hardware_gain_db[i] = (int)strtol(buf, NULL, 10);
         }
+    }
 
-        /* LO frequency (sometimes exposed as "RX_LO" / "TX_LO" via labeled
-         * altvoltage channels rather than the voltage channels — TODO:
-         * verify against actual hardware; for now try the voltage channel's
-         * "lo_freq" or fallback). */
-        if (read_chan_attr_longlong(ch, "lo_freq", &ll) == 0) {
-            out->lo_frequency_hz[i] = ll;
+    /* LO frequencies live on separate altvoltage channels, not on the
+     * voltage channels. Read from ctx->lo[] which we set up in create(). */
+    for (int i = 0; i < ORIINIT_CH_MAX; i++) {
+        if (ctx->lo[i]) {
+            if (read_chan_attr_longlong(ctx->lo[i], "frequency", &ll) == 0) {
+                out->lo_frequency_hz[i] = ll;
+            }
         }
     }
 
