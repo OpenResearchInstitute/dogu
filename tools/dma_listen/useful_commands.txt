@@ -1,0 +1,20 @@
+aarch64-linux-gnu-gcc -O2 -Wall \
+  -I ~/aarch64-sysroot/include \
+  -L ~/aarch64-sysroot/lib \
+  -Wl,--allow-shlib-undefined \
+  -o dma_listen dma_listen.c \
+  -liio -lm
+
+scp dma_listen root@10.73.1.16:~/dma_listen/
+
+ssh root@10.73.1.16
+cd ~/dma_listen/
+./dma_listen
+
+
+
+
+# On the board, with the profile JSON in /tmp/profile.json
+   cat /tmp/profile.json > /sys/bus/iio/devices/iio:device1/profile_config
+   dmesg | tail -20    # check for driver complaints
+   ./dma_listen -c 5   # run 5 refills, see if classifier flips

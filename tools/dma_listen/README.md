@@ -24,18 +24,69 @@ skeleton of a daemon. It's a diagnostic, used for:
 Run it manually during bring-up, profile development, or when
 debugging "is the chip actually streaming useful samples?" questions.
 
-## Build
+## Building
 
-Native build on the ZCU102 (after scp'ing the source):
+The Makefile uses a vendored copy of `iio.h` at v0.25 (matching the
+runtime in PetaLinux 2022.2). This means the build is immune to whether
+the system has `libiio-dev` installed or has libiio v1 installed (the
+new API is incompatible with v0.x).
+
+### Native build on the target
+
+Easiest when the target rootfs has `gcc` (custom PetaLinux image with
+development packages) or you've added a compiler post-install:
 
 ```sh
 make
 ```
 
-Cross-compile from a host with the aarch64 toolchain:
+The default PetaLinux 2022.2 minimal rootfs does NOT include `gcc`
+or `make`. You'll need to cross-compile.
+
+### Cross-compile via PetaLinux SDK (recommended)
+
+If you have the PetaLinux SDK installed (you do, if you built the
+PetaLinux image at all), source its environment-setup script and
+the build "just works":
 
 ```sh
-make CC=aarch64-linux-gnu-gcc
+source /opt/petalinux/2022.2/environment-setup-cortexa72-cortexa53-xilinx-linux
+# (path may differ depending on where PetaLinux is installed)
+make
+```
+
+This gives a clean build with a complete sysroot — libiio's transitive
+dependencies (libusb, libavahi, libxml2, libserialport) all available
+at link time, no `--allow-shlib-undefined` workaround needed.
+
+### Cross-compile without the SDK (manual sysroot)
+
+If you only have the Ubuntu cross-compiler (`gcc-aarch64-linux-gnu`),
+you can build with a minimal manually-assembled sysroot. The catch:
+libiio.so has transitive dependencies that aren't on the build host,
+so the linker needs to be told to defer those to runtime.
+
+```sh
+# One-time setup: pull libiio runtime from the target
+mkdir -p ~/aarch64-sysroot/lib
+scp root@<board>:/usr/lib/libiio.so.0 ~/aarch64-sysroot/lib/
+ln -sf libiio.so.0 ~/aarch64-sysroot/lib/libiio.so
+
+# Then build
+make CC=aarch64-linux-gnu-gcc \
+     LDFLAGS="-L$HOME/aarch64-sysroot/lib -Wl,--allow-shlib-undefined"
+```
+
+The `--allow-shlib-undefined` tells the linker "I know libiio has
+dependencies; trust me, they'll be there at runtime on the target."
+Which is true — `libusb`, `libavahi-*`, `libxml2`, and `libserialport`
+are standard parts of the target rootfs even when libiio-dev isn't
+installed.
+
+### Deploying
+
+```sh
+scp dma_listen root@<board>:/path/to/destination/
 ```
 
 ## Usage
@@ -45,6 +96,9 @@ make CC=aarch64-linux-gnu-gcc
 
 Options:
   -n <samples>   buffer size in samples (default: 4096)
+                 NOTE: AXI-Stream tlast may make the actual per-refill
+                 sample count smaller than this — see "Per-refill size"
+                 below.
   -c <count>     stop after N refills (default: run until Ctrl-C)
   -d <dev>       device name (default: axi-adrv9002-rx-lpc)
   -h             help
@@ -53,19 +107,33 @@ uri              libiio context URI (default: local:)
                  e.g. 'ip:10.73.1.16' to connect remotely
 ```
 
+## Per-refill size
+
+In the Haifuraiya build, each `iio_buffer_refill()` returns ~64 samples
+even when a larger buffer is requested. That's because the upstream
+channelizer in the PL asserts AXI-Stream `tlast` after each complete
+pass through its 64 channel outputs, so the DMA returns at tlast.
+
+This is *useful information about the data path*, not a bug:
+
+- Each refill = one snapshot across all 64 channelizer channels
+- Sample ordering within a refill is by AXI-Stream `tdest` (channel 0,
+  channel 1, ..., channel 63)
+- For non-channelizer-fed AXI-ADC paths, larger refills are expected
+
 ## Example output
 
 Default-profile state (the "no real ADC data" case):
 
 ```
 libiio: using default (local) context
-libiio: context has 8 devices
+libiio: context has 29 devices
 libiio: created buffer for 4096 samples (~16384 bytes per refill)
-libiio: sample rate 1.920 Msps → each refill covers 2.13 ms
+libiio: sample rate 1.920 Msps -> each refill covers 2.13 ms
 
 --- starting refill loop (Ctrl-C to stop) ---
-[0.012s] 4096 samples (16384 B, 1.37 MB/s) | I[-1..0] mean=-0.5 |
-  Q[-1..0] mean=-0.5 | RMS=1.0 | bin=99.2% sat=0.0% distinct_high_I=2 |
+[0.012s] 64 samples (256 B, 4.57 MB/s) | I[-1..0] mean=-0.5 |
+  Q[-1..0] mean=-0.5 | RMS=1.0 | bin=100.0% sat=0.0% distinct_high_I=2 |
   DEFAULT-PROFILE BINARY (no real ADC)
 [0.024s] ...
 ```
@@ -76,9 +144,15 @@ different chip state.
 
 ## Dependencies
 
-- `libiio` (runtime + headers)
+**Runtime** (on the target):
+- `libiio.so.0` (version 0.25 or compatible v0.x)
+- `libusb-1.0`, `libavahi-client`, `libavahi-common`, `libxml2`,
+  `libserialport` — libiio's own dependencies
+
+**Build time**:
+- `gcc` or `clang` (native or aarch64-cross)
 - `libm`
-- GCC or clang
+- No need for `libiio-dev` — we vendor `iio.h` v0.25 in `third_party/`
 
 ## When to use this tool
 

@@ -41,6 +41,7 @@
 #include <math.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -125,7 +126,8 @@ static size_t stats_distinct_high_bytes(const struct stats *s)
     return n;
 }
 
-static void stats_print(const struct stats *s, double elapsed_sec, FILE *out)
+static void stats_print(const struct stats *s, double elapsed_sec,
+                        double refill_dur_sec, FILE *out)
 {
     if (s->total_samples == 0) {
         fprintf(out, "no samples in this refill\n");
@@ -139,8 +141,11 @@ static void stats_print(const struct stats *s, double elapsed_sec, FILE *out)
     double sat_frac = (double)s->saturated_count / s->total_samples;
     size_t distinct = stats_distinct_high_bytes(s);
 
-    /* If 'binary fraction' is >95%, this is the default-profile pattern
-     * and we'd note it specifically; otherwise show generic stats. */
+    /* Per-refill throughput, not cumulative */
+    double mb_per_sec = (refill_dur_sec > 0)
+        ? (s->total_bytes / refill_dur_sec) / 1e6
+        : 0.0;
+
     const char *pattern_hint =
         (binary_frac > 0.95) ? "DEFAULT-PROFILE BINARY (no real ADC)"
         : (distinct >= 20)   ? "MULTI-BIT (real ADC samples?)"
@@ -151,7 +156,7 @@ static void stats_print(const struct stats *s, double elapsed_sec, FILE *out)
         "Q[%d..%d] mean=%.1f | RMS=%.1f | bin=%.1f%% sat=%.1f%% "
         "distinct_high_I=%zu | %s\n",
         elapsed_sec, s->total_samples, s->total_bytes,
-        elapsed_sec > 0 ? (s->total_bytes / elapsed_sec) / 1e6 : 0.0,
+        mb_per_sec,
         s->min_i, s->max_i, mean_i,
         s->min_q, s->max_q, mean_q,
         rms,
@@ -243,11 +248,12 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* Find I and Q channels */
-    struct iio_channel *rx_ch_i = iio_device_find_channel(rx_dev, "voltage0", false);
-    struct iio_channel *rx_ch_q = iio_device_find_channel(rx_dev, "voltage1", false);
+    /* Find I and Q channels.
+     * ADRV9002 uses voltage0_i / voltage0_q (not voltage0 / voltage1 like AD9361). */
+    struct iio_channel *rx_ch_i = iio_device_find_channel(rx_dev, "voltage0_i", false);
+    struct iio_channel *rx_ch_q = iio_device_find_channel(rx_dev, "voltage0_q", false);
     if (!rx_ch_i || !rx_ch_q) {
-        fprintf(stderr, "could not find voltage0 (I) or voltage1 (Q) channel on %s\n",
+        fprintf(stderr, "could not find voltage0_i (I) or voltage0_q (Q) channel on %s\n",
                 device_name);
         iio_context_destroy(ctx);
         return 1;
@@ -279,13 +285,16 @@ int main(int argc, char *argv[])
     /* Main refill loop */
     long refills_done = 0;
     struct stats s;
-    struct timespec t0, t1;
+    struct timespec t0, t1, t_refill_start;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
     fprintf(stderr, "\n--- starting refill loop (Ctrl-C to stop) ---\n");
 
     while (!stop_requested) {
+        clock_gettime(CLOCK_MONOTONIC, &t_refill_start);
         ssize_t nbytes = iio_buffer_refill(buf);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+
         if (nbytes < 0) {
             char errbuf[128];
             iio_strerror((int)-nbytes, errbuf, sizeof(errbuf));
@@ -308,10 +317,11 @@ int main(int argc, char *argv[])
             stats_update(&s, I, Q);
         }
 
-        clock_gettime(CLOCK_MONOTONIC, &t1);
         double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+        double refill_dur = (t1.tv_sec - t_refill_start.tv_sec)
+                          + (t1.tv_nsec - t_refill_start.tv_nsec) / 1e9;
 
-        stats_print(&s, elapsed, stderr);
+        stats_print(&s, elapsed, refill_dur, stderr);
 
         refills_done++;
         if (refill_count > 0 && refills_done >= refill_count) {
