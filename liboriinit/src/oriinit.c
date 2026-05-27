@@ -302,18 +302,27 @@ oriinit_status_t oriinit_run_calibrations(oriinit_ctx_t *ctx,
     oriinit_status_t rc = oriinit_read_state(ctx, &before);
     if (rc != ORIINIT_OK) return rc;
 
-    /* 2. Drop RX1 and RX2 to CALIBRATED.
+    /* 2. Drop active RX channels to CALIBRATED.
      *
      * THIS IS CRITICAL. The driver's behavior of wedging the AXI-ADC bridge
      * happens specifically when initial_calibrations=run is invoked while
      * an RX channel is in rf_enabled. We refuse to do that.
+     *
+     * 1T1R support (added 2026-05-27): we only drop channels that are
+     * currently in a "real" ENSM state. Channels reporting
+     * ORIINIT_ENSM_UNKNOWN (e.g., RX2 after a 1T1R profile load) get
+     * skipped — attempting to set ensm_mode on a disabled channel
+     * returns -EIO and would surface as ORIINIT_ERR_IO. Channels
+     * already in ORIINIT_ENSM_CALIBRATED are also skipped — no need
+     * to drop them, they're already there. This mirrors the pattern
+     * used by the restore loop below.
      */
-    if (ctx->ch[ORIINIT_CH_RX1]) {
-        rc = oriinit_set_ensm(ctx, ORIINIT_CH_RX1, ORIINIT_ENSM_CALIBRATED);
-        if (rc != ORIINIT_OK) return rc;
-    }
-    if (ctx->ch[ORIINIT_CH_RX2]) {
-        rc = oriinit_set_ensm(ctx, ORIINIT_CH_RX2, ORIINIT_ENSM_CALIBRATED);
+    for (int i = ORIINIT_CH_RX1; i <= ORIINIT_CH_RX2; i++) {
+        if (!ctx->ch[i]) continue;
+        if (before.ensm[i] == ORIINIT_ENSM_UNKNOWN) continue;
+        if (before.ensm[i] == ORIINIT_ENSM_CALIBRATED) continue;
+        rc = oriinit_set_ensm(ctx, (oriinit_channel_t)i,
+                              ORIINIT_ENSM_CALIBRATED);
         if (rc != ORIINIT_OK) return rc;
     }
 
@@ -375,23 +384,44 @@ oriinit_status_t oriinit_load_profile(oriinit_ctx_t *ctx, const char *json_path)
     (void)ctx;
     (void)json_path;
 
-    /* TODO: implement when we have a working TES-exported profile JSON
-     * to test against. The implementation will:
-     *   1. Read the JSON file into memory
-     *   2. Drop both RX channels to CALIBRATED (precondition)
-     *   3. Write the JSON to /sys/bus/iio/devices/iio:device1/profile_config
-     *      via iio_device_attr_write_raw()
-     *   4. Verify the load succeeded by reading profile_config back
-     *   5. Restore ENSM states (or set to RF_ENABLED, depending on caller intent)
+    /* TODO: implement using the workflow validated 2026-05-27 on the
+     * bench. The shell-equivalent that we verified working is:
      *
-     * We don't implement this yet because:
-     *   - We don't have a known-working JSON for our specific kernel API
-     *     version (68.5.0, requiring TES 0.23.1 which isn't available)
-     *   - Implementing without ability to test against the hardware risks
-     *     silent bugs in the file-handling / sysfs interaction
+     *     cat profile.json > /sys/bus/iio/devices/iio:device1/profile_config
      *
-     * When TES 0.23.1 is obtained (or a different profile path opens up),
-     * this returns to the top of the priority queue.
+     * The libiio-native equivalent is `iio_device_attr_write_raw()`
+     * against the "profile_config" binary attribute on the adrv9002-phy
+     * device. Implementation will:
+     *   1. Read the JSON file into memory (typical size: 50-75 KB,
+     *      well under ADRV9002_PROFILE_MAX_SZ = 73,728)
+     *   2. Drop both RX channels to CALIBRATED (precondition — same
+     *      reason as run_calibrations: avoid wedging AXI-ADC bridge)
+     *   3. iio_device_attr_write_raw(phy, "profile_config", buf, len)
+     *   4. Check return value; non-zero indicates the driver's
+     *      validation rejected the profile (e.g., "SSI interface
+     *      mismatch. PHY=1, RX1=2" when loading an LVDS profile
+     *      against a CMOS HDL build) — surface as
+     *      ORIINIT_ERR_PROFILE_REJECTED
+     *   5. Restore ENSM states (using the same 1T1R-aware pattern
+     *      as run_calibrations) — but note the LO frequencies will
+     *      have reset to the profile's defaults, so callers may want
+     *      to set their target LOs separately via iio_attr after this.
+     *
+     * Important caveat discovered 2026-05-27: a rejected profile load
+     * is NOT cleanly transactional. The driver starts reconfiguring
+     * the chip, then aborts on validation failure, leaving the data
+     * path wedged (Takadono's frame_count/delta drops to 0). Recovery
+     * is to reload the previously-known-good profile. This library
+     * should consider tracking the last-loaded profile path so that
+     * a failed load can be auto-rolled-back. Open design question.
+     *
+     * Prerequisites that were previously blocking are now resolved:
+     *   - TES 0.23.1 secured (triple-backed-up: Dropbox + USB + Mac)
+     *   - Working JSON profiles generated for multiple configurations
+     *     (1T1R FDD CMOS 1.92 Msps, 1T1R FDD LVDS 20 Msps)
+     *   - Load mechanism validated end-to-end via the shell shortcut
+     *
+     * Schedule: next liboriinit session.
      */
 
     return ORIINIT_ERR_NOT_IMPLEMENTED;
