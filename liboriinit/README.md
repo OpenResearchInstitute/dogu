@@ -4,14 +4,14 @@ ADRV9001/ADRV9002 initialization library for ORI SDR builds.
 
 Encapsulates safe-init logic for the Analog Devices ADRV9001/ADRV9002
 transceiver via libiio. Provides connection management, read-only state
-observation, safe ENSM transitions, and a safe initial-calibrations
-sequence. Profile loading is stubbed pending a working TES-generated
-profile JSON for our driver API version.
+observation, safe ENSM transitions, a safe initial-calibrations sequence
+(with 1T1R configuration support), and a placeholder for profile loading
+once the implementation pass lands.
 
 ## Why this exists
 
-The ADRV9001/9002 driver has sharp edges that bite the unwary. Two in
-particular:
+The ADRV9001/9002 driver has sharp edges that bite the unwary. Three
+in particular:
 
 1. **Writing to `sync_start_enable` from userspace** confuses the driver's
    internal bookkeeping. This attribute is exposed in sysfs but is
@@ -21,8 +21,15 @@ particular:
 2. **Writing `initial_calibrations=run` while ENSM is in `rf_enabled`**
    wedges the FPGA-side AXI-ADC bridge unrecoverably. Recovery requires
    a board reboot. liboriinit refuses this operation by enforcing a safe
-   sequence: snapshot state → drop to `calibrated` → run → poll for
-   completion → restore.
+   sequence: snapshot state → drop active RX channels to `calibrated` →
+   run → poll for completion → restore.
+
+3. **Disabled channels in 1T1R configurations** (e.g., RX2 / TX2 after
+   loading a 1T1R FDD profile) report `ensm: unknown` and `enabled: no`.
+   Writing `ensm_mode` to a disabled channel returns `-EIO`. The
+   calibration safe-sequence has to skip these channels, not blindly
+   iterate over all four. liboriinit does this gating; see
+   `src/oriinit.c` `oriinit_run_calibrations()`.
 
 Encoding these rules in a library means each new daemon, tool, or
 script doesn't need to re-discover them by breaking the board.
@@ -45,9 +52,11 @@ oriinit_status_t oriinit_load_profile(oriinit_ctx_t *, const char *json_path);
 ```
 
 `oriinit_load_profile()` currently returns `ORIINIT_ERR_NOT_IMPLEMENTED`.
-It will be filled in once we have a TES-generated profile JSON matching
-our PetaLinux 2022.2 driver's API version (68.5.0, which requires
-TES 0.23.1 — not currently available from ADI).
+The implementation prerequisites are now resolved (TES 0.23.1 secured,
+working JSON profiles validated end-to-end via the shell shortcut
+`cat profile.json > /sys/bus/iio/devices/iio:device1/profile_config`).
+The TODO comment in `src/oriinit.c` documents the work plan; it's
+scheduled for the next liboriinit session.
 
 ## Companion CLI: `oriinit-cli`
 
@@ -66,39 +75,78 @@ during bring-up.
 
 ## Building
 
-Same model as `tools/dma_listen`: cross-compile via PetaLinux SDK
-(recommended), manual aarch64 sysroot, or native build if the rootfs
-has `gcc`. Uses a vendored `iio.h` v0.25 to be immune to whatever libiio
-version the build host has installed.
+`liboriinit` builds a plain `liboriinit.so` (no version suffix, no
+SONAME machinery) plus the `oriinit-cli` binary that links against it.
+The CLI's rpath is `$ORIGIN`, so it finds the library in the same
+directory at runtime — no system-wide install required.
+
+Uses a vendored `iio.h` v0.25 so the build is immune to whichever
+libiio version the host has installed (or whether libiio is installed
+at all on the host).
+
+### Quick reference — use the top-level Makefile
+
+From the dōgu repo root:
 
 ```sh
-# Cross-compile via PetaLinux SDK
-source /opt/petalinux/2022.2/environment-setup-cortexa72-cortexa53-xilinx-linux
-make
-
-# Or manual cross-compile
-make CC=aarch64-linux-gnu-gcc \
-     LDFLAGS="-L$HOME/aarch64-sysroot/lib -Wl,--allow-shlib-undefined"
+make                                 # native build (host arch, for syntax checking)
+make cross                           # aarch64 cross-compile (default sysroot)
+make cross SYSROOT=/custom/path      # aarch64 with custom sysroot
+make deploy                          # scp aarch64 binaries to the target board
+make clean                           # clean both subdirectories
 ```
 
-Build produces:
+### Direct invocation from this subdirectory
 
-- `liboriinit.so.0.1.0` (versioned shared library)
-- `liboriinit.so.0` and `liboriinit.so` (symlinks)
-- `oriinit-cli` (executable, links against the .so via `$ORIGIN` rpath)
+```sh
+# Native
+make
 
-The CLI's rpath is set to `$ORIGIN` so it finds the .so in the same
-directory during development. The install target (`make install`)
-places the library in `$(PREFIX)/lib` and the CLI in `$(PREFIX)/bin`
-where the system loader's normal search resolves things.
+# Manual cross-compile with SYSROOT
+make CC=aarch64-linux-gnu-gcc SYSROOT=$HOME/aarch64-sysroot
+
+# Or via PetaLinux SDK environment (sets CC + sysroot automatically)
+source /opt/petalinux/2022.2/environment-setup-cortexa72-cortexa53-xilinx-linux
+make
+```
+
+### Build artifacts
+
+```
+liboriinit.so       # the library (single file, no symlinks)
+oriinit-cli         # the CLI tool
+src/oriinit.o       # intermediate object
+```
+
+Both `liboriinit.so` and `oriinit-cli` end up next to each other in
+`liboriinit/` after a successful build. Drop both into the same
+directory on the target and the CLI will find the library via its
+`$ORIGIN` rpath.
 
 ## Deploying to the target
 
+The top-level Makefile has a `deploy` target that handles this
+end-to-end. After `make cross`:
+
 ```sh
-# Ship the library and CLI together
-scp liboriinit.so.0.1.0 root@<board>:/usr/lib/
-ssh root@<board> "cd /usr/lib && ln -sf liboriinit.so.0.1.0 liboriinit.so.0 && ln -sf liboriinit.so.0 liboriinit.so && ldconfig"
-scp oriinit-cli root@<board>:/usr/local/bin/
+make deploy
+# defaults: DEPLOY_HOST=root@10.73.1.16  DEPLOY_PATH=/home/root
+# override either:
+make deploy DEPLOY_HOST=root@haifuraiya.local DEPLOY_PATH=/opt/ori
+```
+
+`make deploy` removes any stale `liboriinit.so*` files from previous
+deployments (including the .so.0 / .so.0.1.0 symlink chain produced
+by older versions of the Makefile), then scp's the fresh binaries.
+One command, repeatable, idempotent.
+
+Manual equivalent if you need it:
+
+```sh
+ssh root@<board> 'rm -f /home/root/liboriinit.so*'
+scp tools/dma_listen/dma_listen root@<board>:/home/root/
+scp liboriinit/oriinit-cli       root@<board>:/home/root/
+scp liboriinit/liboriinit.so     root@<board>:/home/root/
 ```
 
 Or, when a Yocto recipe lands in `dogu/yocto/`, the library + CLI ride
@@ -110,40 +158,72 @@ Once deployed:
 
 ```sh
 # Confirm CLI runs
-oriinit-cli version
+/home/root/oriinit-cli version
+# → 0.1.0
 
-# Read chip state — should match what we know from prior sysfs probing
-oriinit-cli status
-
-# Expected output (with default-profile boot state):
-#   sample_rate_hz: 1920000
-#   initial_calibrations_running: no
-#   RX1_ensm: rf_enabled
-#   RX1_enabled: yes
-#   RX1_gain_db: <whatever the default is>
-#   RX1_lo_hz: <whatever the default LO is>
-#   RX2_ensm: rf_enabled
-#   ...
+# Read chip state
+/home/root/oriinit-cli status
 ```
+
+Expected output after a 1T1R FDD CMOS profile load:
+
+```
+sample_rate_hz: 1920000
+initial_calibrations_running: no
+RX1_ensm: rf_enabled
+RX1_enabled: yes
+RX1_gain_db: 34
+RX1_lo_hz: 2400000000
+RX2_ensm: unknown            # ← 1T1R: RX2 disabled
+RX2_enabled: no
+RX2_gain_db: 0
+RX2_lo_hz: 0
+TX1_ensm: rf_enabled
+TX1_enabled: yes
+TX1_gain_db: -10
+TX1_lo_hz: 2450000000
+TX2_ensm: unknown            # ← 1T1R: TX2 disabled
+TX2_enabled: no
+TX2_gain_db: 0
+TX2_lo_hz: 0
+```
+
+For 2T2R profiles, RX2 and TX2 would show `rf_enabled / enabled: yes`
+instead. `run-calibrations` handles both configurations transparently:
+it iterates over RX1 + RX2, skipping any channel reporting `ensm: unknown`.
 
 ## What's implemented vs. deferred
 
-✅ Connection management (create / destroy)
-✅ State observation (read_state with sample rate, ENSM, enables, gains, LO)
-✅ Streaming verification (verify_streaming)
-✅ Safe ENSM transitions (set_ensm)
-✅ Safe initial-calibrations sequence (run_calibrations)
-✅ String helpers for status/ENSM/channel
-🚧 Profile JSON loading (stubbed; awaiting TES 0.23.1 or equivalent)
-🚧 More attribute coverage (RSSI, calibration table inspection, etc.)
-🚧 systemd-friendly oneshot wrapper (will land in `dogu/services/oriinit/`)
+- ✅ Connection management (create / destroy)
+- ✅ State observation (read_state with sample rate, ENSM, enables, gains, LO)
+- ✅ Streaming verification (verify_streaming)
+- ✅ Safe ENSM transitions (set_ensm)
+- ✅ Safe initial-calibrations sequence (run_calibrations), including 1T1R
+- ✅ String helpers for status/ENSM/channel
+- 🚧 Profile JSON loading (stubbed; prerequisites resolved, implementation
+   scheduled for the next liboriinit session — see `oriinit_load_profile()`
+   TODO comment in `src/oriinit.c`)
+- 🚧 More attribute coverage (RSSI, calibration table inspection, etc.)
+- 🚧 systemd-friendly oneshot wrapper (will land in `dogu/services/oriinit/`)
+
+## Verified bench history
+
+- **2026-05-26** — v0.1 shipped with state observation + 2T2R safe-sequence
+  calibrations. Verified on ZCU102+ADRV9002 with default 2T2R FDD CMOS
+  profile.
+- **2026-05-27** — 1T1R support added (`run_calibrations` skips disabled
+  channels). Verified end-to-end on ZCU102: TES-generated 1T1R FDD CMOS
+  profile loaded via shell shortcut → `oriinit-cli run-calibrations`
+  completes cleanly → real ADC samples flowing through the channelizer
+  (`dma_listen` shows non-zero samples, RMS ≈ 1 LSB consistent with
+  terminated-input thermal noise floor).
 
 ## Layout
 
 ```
 liboriinit/
 ├── README.md                       (this file)
-├── Makefile                        builds .so + CLI + install target
+├── Makefile                        builds liboriinit.so + CLI + install target
 ├── include/
 │   └── oriinit.h                   public API header
 ├── src/
@@ -158,7 +238,7 @@ liboriinit/
 
 ## License
 
-CERN Open Hardware Licence Version 2 - Strongly Reciprocal (CERN-OHL-S v2).
+CERN Open Hardware Licence Version 2 — Strongly Reciprocal (CERN-OHL-S v2).
 
 The vendored `third_party/libiio-v0.25/iio.h` retains its original
 LGPL-2.1-or-later licensing.
