@@ -65,7 +65,8 @@ make clean && make cross && make deploy
 
 | Variable | Default | Notes |
 |---|---|---|
-| `CROSS_COMPILE` | `aarch64-linux-gnu-` | Toolchain prefix (used as `$(CROSS_COMPILE)gcc`) |
+| `XILINX_GNU_DIR` | `/opt/Xilinx/Vitis/2022.2/gnu/aarch64/lin/aarch64-linux/bin` | Directory holding the Vitis-bundled `aarch64-linux-gnu-gcc` |
+| `CROSS_COMPILE` | `$(XILINX_GNU_DIR)/aarch64-linux-gnu-` | Toolchain prefix (used as `$(CROSS_COMPILE)gcc`) |
 | `SYSROOT` | `$HOME/aarch64-sysroot` | Path to aarch64 sysroot with libiio runtime |
 | `DEPLOY_HOST` | `root@10.73.1.16` | Board ssh target |
 | `DEPLOY_PATH` | `/home/root` | Directory on the target |
@@ -73,23 +74,42 @@ make clean && make cross && make deploy
 Override any of them on the command line:
 
 ```sh
-make cross SYSROOT=/opt/petalinux/2022.2/sysroots/cortexa72-cortexa53-xilinx-linux
+make cross XILINX_GNU_DIR=/opt/Xilinx/Vitis/2023.2/gnu/aarch64/lin/aarch64-linux/bin
 make deploy DEPLOY_HOST=root@haifuraiya.local DEPLOY_PATH=/opt/ori
 ```
 
 ### Building a single component
 
 ```sh
-cd tools/dma_listen && make                                       # native
-cd tools/dma_listen && make CC=aarch64-linux-gnu-gcc SYSROOT=...  # cross
+cd tools/dma_listen && make                                          # native
+cd tools/dma_listen && make CROSS_COMPILE=$XILINX_GNU_DIR/aarch64-linux-gnu- SYSROOT=...  # cross
 ```
 
 See each subdirectory's `README.md` for component-specific build notes.
 
+### Cross-compile toolchain (important — read this)
+
+dōgu cross-compiles with the **Xilinx/Vitis-bundled aarch64 GNU toolchain**,
+which the `make cross` default (`XILINX_GNU_DIR`) points at. **Do not use
+Ubuntu's `gcc-aarch64-linux-gnu` apt package for this.** That package
+*conflicts* with `gcc-multilib`, which PetaLinux requires — installing one
+makes apt evict the other. The result is a maddening loop where setting up
+to build PetaLinux silently uninstalls your cross-compiler, and setting up
+to cross-compile dōgu silently breaks PetaLinux. The Vitis toolchain lives
+outside apt, so it sidesteps the conflict entirely, and it's ABI-matched
+(GCC 11.2 / glibc) to the PetaLinux 2022.2 target.
+
+If your Vitis install path or version differs, override `XILINX_GNU_DIR`:
+
+```sh
+make cross XILINX_GNU_DIR=/path/to/Vitis/<version>/gnu/aarch64/lin/aarch64-linux/bin
+```
+
 ### Cross-compile sysroot setup (one-time)
 
-If you don't have the PetaLinux SDK installed, the minimal sysroot path
-just needs libiio's shared library copied from the target:
+The toolchain provides the compiler; the `SYSROOT` provides libiio for the
+linker. A minimal sysroot just needs libiio's shared library copied from
+the target:
 
 ```sh
 mkdir -p ~/aarch64-sysroot/lib
@@ -105,8 +125,11 @@ doesn't complain about libiio's transitive dependencies (libusb,
 libavahi, libxml2, libserialport) — those resolve at runtime on the
 target.
 
-The PetaLinux SDK path is also supported; source its environment-setup
-script and `make` works natively.
+The PetaLinux SDK is also a valid toolchain+sysroot source — build it
+(`petalinux-build --sdk`), install it, source its environment-setup
+script, and `make` picks up `CC` and the sysroot automatically. This is
+the most ABI-rigorous option since the SDK is generated from the same
+project that builds the target rootfs.
 
 ## Switching between native and cross builds
 

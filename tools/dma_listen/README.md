@@ -72,12 +72,11 @@ This gives a clean build with a complete sysroot — libiio's transitive
 dependencies (libusb, libavahi, libxml2, libserialport) all available
 at link time, no `--allow-shlib-undefined` workaround needed.
 
-#### Cross-compile with the Ubuntu cross-toolchain (manual sysroot)
+#### Cross-compile with the Vitis-bundled toolchain (the default path)
 
-If you only have the Ubuntu cross-compiler (`gcc-aarch64-linux-gnu`),
-you can build with a minimal manually-assembled sysroot. The catch:
-libiio.so has transitive dependencies that aren't on the build host,
-so the linker needs to be told to defer those to runtime.
+This is what the top-level `make cross` uses. The Xilinx/Vitis install
+ships an aarch64 GNU toolchain; combined with a minimal sysroot for
+libiio, it produces deployable binaries.
 
 ```sh
 # One-time setup: pull libiio runtime from the target
@@ -85,8 +84,9 @@ mkdir -p ~/aarch64-sysroot/lib
 scp root@<board>:/usr/lib/libiio.so.0 ~/aarch64-sysroot/lib/
 ln -sf libiio.so.0 ~/aarch64-sysroot/lib/libiio.so
 
-# Then build (clean form using SYSROOT variable)
-make CC=aarch64-linux-gnu-gcc SYSROOT=$HOME/aarch64-sysroot
+# Then build (the Vitis toolchain + SYSROOT)
+make CROSS_COMPILE=/opt/Xilinx/Vitis/2022.2/gnu/aarch64/lin/aarch64-linux/bin/aarch64-linux-gnu- \
+     SYSROOT=$HOME/aarch64-sysroot
 ```
 
 The Makefile expands `SYSROOT` into the appropriate `-L$(SYSROOT)/lib`
@@ -95,6 +95,14 @@ and `-Wl,--allow-shlib-undefined` flags. The latter tells the linker
 on the target." Which is true — `libusb`, `libavahi-*`, `libxml2`, and
 `libserialport` are standard parts of the target rootfs even when
 libiio-dev isn't installed.
+
+> **Why the Vitis toolchain and not Ubuntu's `gcc-aarch64-linux-gnu`?**
+> The Ubuntu apt package conflicts with `gcc-multilib` (which PetaLinux
+> requires) — installing one evicts the other, so you end up in a loop
+> where building PetaLinux breaks your cross-compiler and vice versa.
+> The Vitis toolchain lives outside apt, dodging the conflict, and is
+> ABI-matched (GCC 11.2/glibc) to the PetaLinux 2022.2 target. The
+> top-level Makefile defaults to it for exactly this reason.
 
 ### Deploying
 

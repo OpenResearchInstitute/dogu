@@ -99,16 +99,23 @@ make clean                           # clean both subdirectories
 ### Direct invocation from this subdirectory
 
 ```sh
-# Native
+# Native (host arch, for syntax checking)
 make
 
-# Manual cross-compile with SYSROOT
-make CC=aarch64-linux-gnu-gcc SYSROOT=$HOME/aarch64-sysroot
+# Cross-compile with the Vitis-bundled toolchain (what `make cross` uses)
+make CROSS_COMPILE=/opt/Xilinx/Vitis/2022.2/gnu/aarch64/lin/aarch64-linux/bin/aarch64-linux-gnu- \
+     SYSROOT=$HOME/aarch64-sysroot
 
 # Or via PetaLinux SDK environment (sets CC + sysroot automatically)
 source /opt/petalinux/2022.2/environment-setup-cortexa72-cortexa53-xilinx-linux
 make
 ```
+
+> **Do not** cross-compile with Ubuntu's `gcc-aarch64-linux-gnu` apt
+> package — it conflicts with `gcc-multilib` (a PetaLinux dependency) and
+> the two evict each other on every apt operation. The top-level Makefile
+> defaults `CROSS_COMPILE` to the Vitis toolchain specifically to avoid
+> this. See the repo-root `README.md` "Cross-compile toolchain" section.
 
 ### Build artifacts
 
