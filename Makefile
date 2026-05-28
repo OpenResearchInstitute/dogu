@@ -9,15 +9,30 @@ SUBDIRS := tools/dma_listen liboriinit
 # Cross-compile defaults — used by `make cross`.
 # Override on the command line if needed:
 #
-#   make cross SYSROOT=/opt/petalinux/.../sysroots/cortexa72-cortexa53-xilinx-linux
-#   make cross CROSS_COMPILE=aarch64-poky-linux-
+#   make cross SYSROOT=/path/to/aarch64/sysroot
+#   make cross XILINX_GNU_DIR=/opt/Xilinx/Vitis/2023.2/.../bin
+#   make cross CROSS_COMPILE=/some/other/toolchain/aarch64-linux-gnu-
 # -----------------------------------------------------------------------
 
 # Path to the aarch64 sysroot containing libiio runtime + headers.
 SYSROOT          ?= $(HOME)/aarch64-sysroot
 
+# Cross toolchain.
+#
+# We deliberately use the Xilinx/Vitis-bundled aarch64 Linux GNU toolchain,
+# NOT Ubuntu's gcc-aarch64-linux-gnu apt package. Reason: that apt package
+# conflicts with gcc-multilib (which PetaLinux requires), so installing one
+# evicts the other — every switch between "build PetaLinux" and "build dogu"
+# silently uninstalled the toolchain we needed. The Vitis toolchain lives
+# outside apt, so the two coexist permanently. It is also GCC 11.2 / glibc,
+# ABI-matched to the PetaLinux 2022.2 target rootfs.
+#
+# XILINX_GNU_DIR points at the directory holding aarch64-linux-gnu-gcc.
+# Override it if your Xilinx install path or version differs.
+XILINX_GNU_DIR   ?= /opt/Xilinx/Vitis/2022.2/gnu/aarch64/lin/aarch64-linux/bin
+
 # Toolchain prefix. The compiler used will be $(CROSS_COMPILE)gcc.
-CROSS_COMPILE    ?= aarch64-linux-gnu-
+CROSS_COMPILE    ?= $(XILINX_GNU_DIR)/aarch64-linux-gnu-
 
 # -----------------------------------------------------------------------
 # Deploy defaults — used by `make deploy`.
@@ -103,8 +118,11 @@ help:
 	@echo "                     CC            = \$$(CROSS_COMPILE)gcc"
 	@echo "                     SYSROOT       = \$$(SYSROOT)"
 	@echo "                   defaults:"
-	@echo "                     CROSS_COMPILE = aarch64-linux-gnu-"
-	@echo "                     SYSROOT       = \$$HOME/aarch64-sysroot"
+	@echo "                     XILINX_GNU_DIR = /opt/Xilinx/Vitis/2022.2/gnu/aarch64/lin/aarch64-linux/bin"
+	@echo "                     CROSS_COMPILE  = \$$(XILINX_GNU_DIR)/aarch64-linux-gnu-"
+	@echo "                     SYSROOT        = \$$HOME/aarch64-sysroot"
+	@echo "                   (Vitis-bundled toolchain, not Ubuntu's apt cross-gcc —"
+	@echo "                    the apt one conflicts with gcc-multilib / PetaLinux)"
 	@echo ""
 	@echo "  deploy           ship cross-compiled binaries to the target board"
 	@echo "                   removes stale liboriinit.so* first to avoid the"
