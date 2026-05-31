@@ -92,11 +92,18 @@ deploy:
 	scp liboriinit/oriinit-cli         $(DEPLOY_HOST):$(DEPLOY_PATH)/oriinit-cli
 	scp liboriinit/liboriinit.so       $(DEPLOY_HOST):$(DEPLOY_PATH)/liboriinit.so
 	scp bring-up.sh                    $(DEPLOY_HOST):$(DEPLOY_PATH)/bring-up.sh
+	@if [ -d profiles ]; then \
+		echo "==> Copying TES profiles"; \
+		for f in profiles/*.bin profiles/*.json; do \
+			[ -f "$$f" ] && scp "$$f" $(DEPLOY_HOST):$(DEPLOY_PATH)/; \
+		done; \
+	fi
 	ssh $(DEPLOY_HOST) 'chmod +x $(DEPLOY_PATH)/bring-up.sh'
 	@echo ""
 	@echo "Deploy complete. Verify on the target:"
 	@echo "  ssh $(DEPLOY_HOST) 'ls -la $(DEPLOY_PATH)/{dma_listen,oriinit-cli,liboriinit.so}'"
 	@echo "  ssh $(DEPLOY_HOST) '$(DEPLOY_PATH)/oriinit-cli status'"
+	@echo "  bring-up.sh tes_0231_Haifuraiya_FDD_LVDS_20Msps_10MHz"
 
 clean:
 	@for d in $(SUBDIRS); do \
