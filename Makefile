@@ -15,7 +15,7 @@ SUBDIRS := tools/dma_listen liboriinit
 # -----------------------------------------------------------------------
 
 # Path to the aarch64 sysroot containing libiio runtime + headers.
-SYSROOT          ?= $(HOME)/aarch64-sysroot
+SYSROOT          ?= $(HOME)/petalinux-sdk/sysroots/cortexa72-cortexa53-xilinx-linux
 
 # Cross toolchain.
 #

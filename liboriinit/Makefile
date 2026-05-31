@@ -37,7 +37,8 @@ LDLIBS  := -liio
 # -----------------------------------------------------------------------
 SYSROOT ?=
 ifneq ($(strip $(SYSROOT)),)
-  LDFLAGS += -L$(SYSROOT)/lib -Wl,--allow-shlib-undefined
+  CFLAGS  += --sysroot=$(SYSROOT)
+  LDFLAGS += --sysroot=$(SYSROOT) -L$(SYSROOT)/usr/lib -L$(SYSROOT)/lib -Wl,--allow-shlib-undefined
 endif
 
 PREFIX  ?= /usr/local
