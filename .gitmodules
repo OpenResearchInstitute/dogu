@@ -1,0 +1,3 @@
+[submodule "frame_decoder/opv-cxx-demod"]
+	path = frame_decoder/opv-cxx-demod
+	url = https://github.com/OpenResearchInstitute/opv-cxx-demod.git
