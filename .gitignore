@@ -10,6 +10,8 @@ tools/*/dma_listen
 tools/*/oriinit-cli
 tools/*/csr_dump
 liboriinit/oriinit-cli
+frame_decoder/opv-decode
+tools/frame_send/frame_send
 
 # Yocto / OE build output
 yocto/build/
