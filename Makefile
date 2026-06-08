@@ -4,6 +4,7 @@
 # Subdirectories that have something to build right now.
 # Add to this list as new components come online.
 SUBDIRS := tools/dma_listen liboriinit frame_decoder
+SUBDIRS := tools/dma_listen liboriinit frame_decoder tools/frame_send
 
 # -----------------------------------------------------------------------
 # Cross-compile defaults — used by `make cross`.
@@ -102,6 +103,7 @@ deploy:
 	ssh $(DEPLOY_HOST) 'rm -f $(DEPLOY_PATH)/liboriinit.so*'
 	@echo "==> Copying binaries + library"
 	scp tools/dma_listen/dma_listen   $(DEPLOY_HOST):$(DEPLOY_PATH)/dma_listen
+	scp tools/frame_send/frame_send    $(DEPLOY_HOST):$(DEPLOY_PATH)/frame_send
 	scp liboriinit/oriinit-cli         $(DEPLOY_HOST):$(DEPLOY_PATH)/oriinit-cli
 	scp liboriinit/liboriinit.so       $(DEPLOY_HOST):$(DEPLOY_PATH)/liboriinit.so
 	scp frame_decoder/opv-decode       $(DEPLOY_HOST):$(DEPLOY_PATH)/opv-decode
