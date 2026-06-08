@@ -3,7 +3,7 @@
 
 # Subdirectories that have something to build right now.
 # Add to this list as new components come online.
-SUBDIRS := tools/dma_listen liboriinit
+SUBDIRS := tools/dma_listen liboriinit frame_decoder
 
 # -----------------------------------------------------------------------
 # Cross-compile defaults — used by `make cross`.
@@ -44,7 +44,16 @@ CROSS_COMPILE    ?= $(XILINX_GNU_DIR)/aarch64-linux-gnu-
 DEPLOY_HOST      ?= root@10.73.1.16
 DEPLOY_PATH      ?= /home/root
 
-.PHONY: all native cross deploy clean install help $(SUBDIRS)
+# -----------------------------------------------------------------------
+# Self-test defaults — used by `make test-frame-decoder`.
+# Generates a known soft-symbol fixture from the repo's own host tools,
+# decodes it both on the host (golden) and on the target, and asserts the
+# two agree. Override frame count / station as needed.
+# -----------------------------------------------------------------------
+TEST_FRAMES   ?= 20
+TEST_STATION  ?= W5NYV
+
+.PHONY: all native cross deploy clean install help test test-frame-decoder $(SUBDIRS)
 
 # Default: native build for host (matches pre-existing behavior).
 all: native
@@ -84,6 +93,10 @@ deploy:
 		echo "ERROR: dma_listen missing — run 'make cross' first." >&2; \
 		exit 1; \
 	fi
+	@if [ ! -x frame_decoder/opv-decode ]; then \
+		echo "ERROR: frame_decoder/opv-decode missing — run 'make cross' first." >&2; \
+		exit 1; \
+	fi
 	@echo "==> Deploying to $(DEPLOY_HOST):$(DEPLOY_PATH)"
 	@echo "==> Removing any stale liboriinit.so* files on target"
 	ssh $(DEPLOY_HOST) 'rm -f $(DEPLOY_PATH)/liboriinit.so*'
@@ -91,6 +104,7 @@ deploy:
 	scp tools/dma_listen/dma_listen   $(DEPLOY_HOST):$(DEPLOY_PATH)/dma_listen
 	scp liboriinit/oriinit-cli         $(DEPLOY_HOST):$(DEPLOY_PATH)/oriinit-cli
 	scp liboriinit/liboriinit.so       $(DEPLOY_HOST):$(DEPLOY_PATH)/liboriinit.so
+	scp frame_decoder/opv-decode       $(DEPLOY_HOST):$(DEPLOY_PATH)/opv-decode
 	scp bring-up.sh                    $(DEPLOY_HOST):$(DEPLOY_PATH)/bring-up.sh
 	@if [ -d profiles ]; then \
 		echo "==> Copying TES profiles"; \
@@ -103,7 +117,45 @@ deploy:
 	@echo "Deploy complete. Verify on the target:"
 	@echo "  ssh $(DEPLOY_HOST) 'ls -la $(DEPLOY_PATH)/{dma_listen,oriinit-cli,liboriinit.so}'"
 	@echo "  ssh $(DEPLOY_HOST) '$(DEPLOY_PATH)/oriinit-cli status'"
+	@echo "  ssh $(DEPLOY_HOST) '$(DEPLOY_PATH)/opv-decode -q -r < test_soft.s16 | wc -c'   # 134 bytes/frame"
+	@echo "  make test-frame-decoder      # end-to-end: host-golden vs on-target decode"
 	@echo "  bring-up.sh tes_0231_Haifuraiya_FDD_LVDS_20Msps_10MHz"
+
+# -----------------------------------------------------------------------
+# Self-test: prove the deployed opv-decode runs on the A53 and produces the
+# exact same frames as the host reference build.
+#   1. build host opv-mod / opv-demod / opv-decode from the submodule
+#   2. mod TEST_FRAMES frames -> demod (-X taps the int16 soft stream the
+#      fabric will emit) -> host opv-decode = golden frames
+#   3. ship the soft fixture to the target, decode with the deployed aarch64
+#      opv-decode, pull the frames back
+#   4. assert: target frame count == TEST_FRAMES AND target == host golden
+# Requires `make cross && make deploy` first. The soft fixture is the same
+# bytes both sides decode, so a correct cross-arch decode is bit-identical.
+# -----------------------------------------------------------------------
+test: test-frame-decoder
+
+test-frame-decoder:
+	@echo "==> Building host reference tools from the submodule"
+	@$(MAKE) -s -C frame_decoder/opv-cxx-demod bin/opv-mod bin/opv-demod bin/opv-decode >/dev/null
+	@OPV=frame_decoder/opv-cxx-demod; \
+	 echo "==> Generating $(TEST_FRAMES)-frame soft fixture (station $(TEST_STATION))"; \
+	 $$OPV/bin/opv-mod -S $(TEST_STATION) -B $(TEST_FRAMES) 2>/dev/null \
+	   | $$OPV/bin/opv-demod -s -c -q -X /tmp/dogu_fd_soft.s16 >/dev/null 2>&1; \
+	 $$OPV/bin/opv-decode -q -r < /tmp/dogu_fd_soft.s16 > /tmp/dogu_fd_golden.bin 2>/dev/null; \
+	 GF=$$(( $$(wc -c < /tmp/dogu_fd_golden.bin) / 134 )); \
+	 echo "    host golden: $$GF frames"; \
+	 echo "==> Shipping fixture to $(DEPLOY_HOST) and decoding on target"; \
+	 scp -q /tmp/dogu_fd_soft.s16 $(DEPLOY_HOST):$(DEPLOY_PATH)/test_soft.s16; \
+	 ssh $(DEPLOY_HOST) '$(DEPLOY_PATH)/opv-decode -q -r < $(DEPLOY_PATH)/test_soft.s16 > $(DEPLOY_PATH)/test_frames.bin 2>/dev/null'; \
+	 scp -q $(DEPLOY_HOST):$(DEPLOY_PATH)/test_frames.bin /tmp/dogu_fd_target.bin; \
+	 TF=$$(( $$(wc -c < /tmp/dogu_fd_target.bin) / 134 )); \
+	 echo "    target:      $$TF frames"; \
+	 if cmp -s /tmp/dogu_fd_golden.bin /tmp/dogu_fd_target.bin && [ "$$TF" -eq "$(TEST_FRAMES)" ]; then \
+	   echo "✓ frame_decoder: A53 decode is bit-identical to host reference ($$TF/$(TEST_FRAMES) frames)"; \
+	 else \
+	   echo "✗ frame_decoder: mismatch (host $$GF, target $$TF) — investigate"; exit 1; \
+	 fi
 
 clean:
 	@for d in $(SUBDIRS); do \

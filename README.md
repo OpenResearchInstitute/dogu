@@ -28,6 +28,8 @@ dogu/
 │   └── dma_listen/         Validate libiio + AXI-ADC DMA path
 ├── liboriinit/           ADRV9001/9002 init library (chip configuration
 │                         + safe-state enforcement via libiio)
+├── frame_decoder/        A53 OPV frame decoder (opv-cxx-demod submodule):
+│                         soft bits from the PL -> decoded frames -> Interlocutor
 ├── services/             systemd services for telemetry + observability
 │                           (Hatsuon, dvbs2-mon, kabura-mon, etc.)
 └── yocto/                Yocto recipes for packaging into PetaLinux images
@@ -37,6 +39,9 @@ dogu/
 
 - ✅ `tools/dma_listen` — PS↔PL DMA path validator. Verified working on
   ZCU102+ADRV9002.
+- ✅ `frame_decoder` — A53 `opv-decode` from the opv-cxx-demod submodule;
+  cross-builds for aarch64, ships via `make deploy`, self-tests via
+  `make test-frame-decoder`.
 - ✅ `liboriinit` v0.1 — chip-init library with state observation,
   safe-sequence calibrations (1T1R + 2T2R), and CLI. Profile-load
   function stubbed pending one more implementation pass.
