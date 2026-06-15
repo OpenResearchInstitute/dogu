@@ -106,6 +106,8 @@ deploy:
 	scp tools/frame_send/frame_send    $(DEPLOY_HOST):$(DEPLOY_PATH)/frame_send
 	scp liboriinit/oriinit-cli         $(DEPLOY_HOST):$(DEPLOY_PATH)/oriinit-cli
 	scp liboriinit/liboriinit.so       $(DEPLOY_HOST):$(DEPLOY_PATH)/liboriinit.so
+	@file frame_decoder/opv-decode | grep -q 'aarch64' || \
+	{ echo "ERROR: opv-decode is not aarch64 — run 'make cross' (host build clobbered it)"; exit 1; }
 	scp frame_decoder/opv-decode       $(DEPLOY_HOST):$(DEPLOY_PATH)/opv-decode
 	scp bring-up.sh                    $(DEPLOY_HOST):$(DEPLOY_PATH)/bring-up.sh
 	@if [ -d profiles ]; then \

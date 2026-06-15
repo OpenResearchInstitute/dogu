@@ -23,7 +23,7 @@
 set -e
 
 PROFILE=$1
-OUTPUT_SHIFT=${2:-2}
+OUTPUT_SHIFT=${2:-4}
 PROFILE_DIR=${PROFILE_DIR:-/home/root}
 
 IIO_PHY=/sys/bus/iio/devices/iio:device1
@@ -113,6 +113,18 @@ if [ "$COUNT1" = "$COUNT2" ]; then
 else
     echo "      frame_count: $COUNT1 → $COUNT2 (live)"
 fi
+
+# --- step 4b: AFE level report (report-only, no thresholds) ------------------
+# Records front-end state every boot. RSSI/dec_power are meaningful only while
+# the RX is live, so ensm is printed alongside as context (not a gate).
+echo "[4b] AFE state:"
+echo "      ensm            = $(cat $IIO_PHY/in_voltage0_ensm_mode 2>/dev/null || echo n/a)"
+echo "      gain_mode       = $(cat $IIO_PHY/in_voltage0_gain_control_mode 2>/dev/null || echo n/a)"
+echo "      hardwaregain    = $(cat $IIO_PHY/in_voltage0_hardwaregain 2>/dev/null || echo n/a)"
+echo "      bbdc_rej        = $(cat $IIO_PHY/in_voltage0_bbdc_rejection_en 2>/dev/null || echo n/a)"
+echo "      bbdc_rej_track  = $(cat $IIO_PHY/in_voltage0_bbdc_rejection_tracking_en 2>/dev/null || echo n/a)"
+echo "      decimated_power = $(cat $IIO_PHY/in_voltage0_decimated_power 2>/dev/null || echo n/a)   (dB below full scale; 0 = clipping)"
+echo "      rssi            = $(cat $IIO_PHY/in_voltage0_rssi 2>/dev/null || echo n/a)   (dB below full scale)"
 
 # --- step 5: summary report --------------------------------------------------
 
