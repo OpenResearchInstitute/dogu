@@ -1,26 +1,42 @@
-/* dma_listen.c — Validate ARM userspace ↔ channelizer DMA path on ZCU102
+/* dma_listen.c — Listen to the demod soft-bit DMA stream on ZCU102
  *
- * Opens an libiio context, creates a buffer on axi-adrv9002-rx-lpc,
- * loops on iio_buffer_refill(), and prints summary statistics per
- * refill: byte count, distinct sample values, magnitude stats.
+ * Opens a libiio context, creates a buffer on axi-adrv9002-rx-lpc, loops
+ * on iio_buffer_refill(), and prints per-refill statistics. Optionally
+ * writes the raw bytes to a file for opv-decode.
  *
- * ROLE: This is a *PS↔PL plumbing validator*, not the skeleton of a
- * demod daemon. In the Haifuraiya transponder architecture, the demod
- * lives entirely in the PL — the ARM never sees per-sample I/Q data
- * in production. This tool exists purely as a diagnostic:
+ * SEAM (read this before trusting the numbers):
+ * Since the Phase B splice (syn/zcu102_with_adrv9001/system_bd.tcl, B.9),
+ * axi_adrv9001_rx1_dma is fed by the DEMODULATOR'S SOFT-BIT OUTPUT, not
+ * raw ADC samples and not channel IQ:
  *
- *   - Confirms the AXI-ADC bridge is functional (PS can DMA from PL)
- *   - Detects the default-profile 0x00/0xFF binary pattern signature
- *   - Validates a custom profile produces multi-bit data
- *   - Can be used to capture raw I/Q files for offline analysis with
- *     opv-cxx-demod or other tools
+ *     channelizer_rx1/m_axis_soft_bit -> soft_widen_rx1 -> rx1_dma
  *
- * Not part of any production service. Run it manually during bring-up,
- * profile development, or when debugging "is the chip actually streaming
- * useful samples?" questions.
+ * Each beat is one 3-bit soft value (0..7) zero-extended to a byte —
+ * exactly the layout `opv-decode -3` consumes. The stream is BURSTY:
+ * soft bits are emitted only for decoded frame payloads. One frame is
  *
- * Output is one summary line per refill to stderr, suitable for piping
- * to a log file.
+ *     40 ms x 54,200 baud = 2168 symbols, minus the 24-bit sync word
+ *     consumed by the frame-sync detector = 2144 soft bytes per frame
+ *
+ * (hardware-verified: PARTIAL_XFER_LEN read 0x10C0 = 4288 = 2 frames
+ * after exactly 2 frame decodes). While frame-locked at 25 frames/s the
+ * stream runs ~53.6 kB/s; on a quiet band it is SILENT and refills
+ * simply do not complete. A refill timeout here usually means "no
+ * frames," not "broken plumbing."
+ *
+ * The IIO device still describes itself as 2x int16 IQ at 20 Msps —
+ * that is the ADC driver's vestigial self-image, not the stream. This
+ * tool walks the buffer as raw bytes and ignores the channel format.
+ *
+ * DIAGNOSTIC VALUE: any byte > 7 is impossible from the 3-bit widener —
+ * the out-of-range counter is a plumbing-corruption detector. The soft
+ * histogram is also the hardware-measured soft distribution needed for
+ * fsync quantizer calibration (compare against opv-decode -3's law).
+ *
+ * ROLE: PS<->PL diagnostic and payload tap. The soft bytes traverse
+ * ADC -> SSI -> halfband -> channelizer -> eq -> normalizer -> MLSE
+ * demod -> frame sync -> widener -> DMAC -> DDR, so bytes landing here
+ * vouch for the entire RX fabric path end to end.
  *
  * Build:
  *   aarch64-linux-gnu-gcc -O2 -Wall -o dma_listen dma_listen.c -liio -lm
@@ -29,15 +45,24 @@
  *   gcc -O2 -Wall -o dma_listen dma_listen.c -liio -lm
  *
  * Usage:
- *   ./dma_listen                            # local libiio context
- *   ./dma_listen ip:10.73.1.16              # network libiio context
- *   ./dma_listen -n 4096                    # buffer size in samples
- *   ./dma_listen -c 100                     # stop after 100 refills
+ *   ./dma_listen                       # local context, stats only
+ *   ./dma_listen ip:10.73.1.16         # network libiio context
+ *   ./dma_listen -n 536                # 536 samples = 2144 B = 1 frame/refill
+ *   ./dma_listen -c 100                # stop after 100 refills
+ *   ./dma_listen -t 5000 -k            # 5 s timeout, retry forever (SIGINT-able)
+ *   ./dma_listen -t 5000 -k -w /tmp/softbits.bin   # first-light capture
+ *
+ * FIRST-LIGHT IDIOM: -t 5000 -k -w <file>. The tool rides through quiet
+ * timeouts, rings one line per timeout, and captures every frame's soft
+ * bytes the moment the band comes alive. Then:  opv-decode -3 <file>.
+ * (Avoid -t 0: a refill blocked with no timeout is uninterruptible in
+ * the kernel and shrugs off Ctrl-C; you will need kill -9.)
  *
  * License: CERN-OHL-S v2 (matches the rest of Haifuraiya)
  */
 
 #include <iio.h>
+#include <errno.h>
 #include <math.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -53,8 +78,12 @@
 /* Configuration                                                            */
 /* ----------------------------------------------------------------------- */
 
-#define DEFAULT_BUFFER_SAMPLES  4096
+#define DEFAULT_BUFFER_SAMPLES  4096        /* IIO samples (4 B each) */
 #define DEFAULT_RX_DEV          "axi-adrv9002-rx-lpc"
+
+/* 40 ms x 54,200 baud = 2168 symbols; minus 24-bit sync word = 2144
+ * payload soft bits per frame, one byte each after the widener. */
+#define FRAME_SOFT_BYTES        2144
 
 static volatile sig_atomic_t stop_requested = 0;
 
@@ -65,105 +94,70 @@ static void on_sigint(int sig)
 }
 
 /* ----------------------------------------------------------------------- */
-/* Sample statistics                                                        */
+/* Soft-bit statistics                                                      */
 /* ----------------------------------------------------------------------- */
 
 struct stats {
-    size_t total_samples;
-    size_t total_bytes;
-    int64_t sum_i;
-    int64_t sum_q;
-    int64_t sum_mag_sq;     /* I*I + Q*Q, accumulator */
-    int16_t min_i, max_i;
-    int16_t min_q, max_q;
-    size_t saturated_count; /* I or Q exactly ±32767 or ±32768 */
-    size_t binary_count;    /* sample where I and Q are both 0 OR both -1 */
-    /* Track distinct I values (small histogram) */
-    uint8_t i_histogram[256]; /* sampled high byte of I */
+    size_t   total_bytes;
+    uint64_t hist[8];       /* histogram of in-range soft values 0..7 */
+    uint64_t sum;           /* sum of in-range soft values            */
+    size_t   oor_count;     /* bytes > 7: impossible from the widener */
+    uint8_t  oor_example;   /* first offending byte, for the log      */
 };
 
 static void stats_reset(struct stats *s)
 {
     memset(s, 0, sizeof(*s));
-    s->min_i = s->min_q = INT16_MAX;
-    s->max_i = s->max_q = INT16_MIN;
 }
 
-static void stats_update(struct stats *s, int16_t I, int16_t Q)
+static void stats_update(struct stats *s, const uint8_t *p, size_t n)
 {
-    s->total_samples++;
-    s->sum_i += I;
-    s->sum_q += Q;
-    s->sum_mag_sq += (int64_t)I * I + (int64_t)Q * Q;
-
-    if (I < s->min_i) s->min_i = I;
-    if (I > s->max_i) s->max_i = I;
-    if (Q < s->min_q) s->min_q = Q;
-    if (Q > s->max_q) s->max_q = Q;
-
-    if (I == 32767 || I == -32768 || Q == 32767 || Q == -32768)
-        s->saturated_count++;
-
-    /* "binary" pattern from the default profile: I and Q both 0x0000 or
-     * 0xFFFF (which is int16 -1). This is the most common diagnostic
-     * signature on this build. */
-    if ((I == 0 || I == -1) && (Q == 0 || Q == -1))
-        s->binary_count++;
-
-    /* Histogram on the high byte of I, captures coarse value distribution
-     * cheaply without a 65536-entry array. */
-    uint8_t high_i = (uint8_t)((I >> 8) & 0xff);
-    if (s->i_histogram[high_i] < 255)
-        s->i_histogram[high_i]++;
+    s->total_bytes += n;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t v = p[i];
+        if (v < 8) {
+            s->hist[v]++;
+            s->sum += v;
+        } else {
+            if (s->oor_count == 0)
+                s->oor_example = v;
+            s->oor_count++;
+        }
+    }
 }
 
-static size_t stats_distinct_high_bytes(const struct stats *s)
+static void stats_print(const struct stats *s, double elapsed_sec, FILE *out)
 {
-    size_t n = 0;
-    for (int i = 0; i < 256; i++)
-        if (s->i_histogram[i])
-            n++;
-    return n;
-}
-
-static void stats_print(const struct stats *s, double elapsed_sec,
-                        double refill_dur_sec, FILE *out)
-{
-    if (s->total_samples == 0) {
-        fprintf(out, "no samples in this refill\n");
+    if (s->total_bytes == 0) {
+        fprintf(out, "no bytes in this refill\n");
         return;
     }
 
-    double mean_i = (double)s->sum_i / s->total_samples;
-    double mean_q = (double)s->sum_q / s->total_samples;
-    double rms = sqrt((double)s->sum_mag_sq / s->total_samples);
-    double binary_frac = (double)s->binary_count / s->total_samples;
-    double sat_frac = (double)s->saturated_count / s->total_samples;
-    size_t distinct = stats_distinct_high_bytes(s);
-
-    /* Per-refill throughput, not cumulative */
-    double mb_per_sec = (refill_dur_sec > 0)
-        ? (s->total_bytes / refill_dur_sec) / 1e6
-        : 0.0;
-
-    const char *pattern_hint =
-        (binary_frac > 0.95) ? "DEFAULT-PROFILE BINARY (no real ADC)"
-        : (distinct >= 20)   ? "MULTI-BIT (real ADC samples?)"
-        :                      "OTHER (intermediate)";
+    size_t in_range = s->total_bytes - s->oor_count;
+    double mean = in_range ? (double)s->sum / in_range : 0.0;
+    double frames = (double)s->total_bytes / FRAME_SOFT_BYTES;
 
     fprintf(out,
-        "[%.3fs] %zu samples (%zu B, %.2f MB/s) | I[%d..%d] mean=%.1f | "
-        "Q[%d..%d] mean=%.1f | RMS=%.1f | bin=%.1f%% sat=%.1f%% "
-        "distinct_high_I=%zu | %s\n",
-        elapsed_sec, s->total_samples, s->total_bytes,
-        mb_per_sec,
-        s->min_i, s->max_i, mean_i,
-        s->min_q, s->max_q, mean_q,
-        rms,
-        100.0 * binary_frac,
-        100.0 * sat_frac,
-        distinct,
-        pattern_hint);
+        "[%.3fs] %zu B = %.2f frames | soft mean=%.2f | "
+        "hist 0:%llu 1:%llu 2:%llu 3:%llu 4:%llu 5:%llu 6:%llu 7:%llu",
+        elapsed_sec, s->total_bytes, frames, mean,
+        (unsigned long long)s->hist[0], (unsigned long long)s->hist[1],
+        (unsigned long long)s->hist[2], (unsigned long long)s->hist[3],
+        (unsigned long long)s->hist[4], (unsigned long long)s->hist[5],
+        (unsigned long long)s->hist[6], (unsigned long long)s->hist[7]);
+
+    if (s->oor_count)
+        fprintf(out, " | OOR=%zu (first=0x%02X) *** CORRUPTION ***",
+                s->oor_count, s->oor_example);
+
+    /* Non-integer frame counts are expected only if a refill filled to
+     * the buffer limit mid-frame; partial transfers normally end refills
+     * on frame (tlast) boundaries. */
+    double frac = frames - (long)frames;
+    if (frac > 0.001 && frac < 0.999)
+        fprintf(out, " | non-integer frames (mid-frame boundary)");
+
+    fprintf(out, "\n");
 }
 
 /* ----------------------------------------------------------------------- */
@@ -173,38 +167,43 @@ static void stats_print(const struct stats *s, double elapsed_sec,
 static void print_usage(const char *prog)
 {
     fprintf(stderr,
-        "Usage: %s [options] [uri]\n"
+        "Listen to the demod soft-bit DMA stream (rx1) and report per-refill\n"
+        "statistics; optionally capture raw bytes for opv-decode -3.\n"
         "\n"
-        "Validate ARM↔channelizer DMA on ZCU102 by reading I/Q samples\n"
-        "via libiio and printing summary stats per refill.\n"
-        "\n"
-        "Options:\n"
-        "  -n <samples>   buffer size in samples (default: %d)\n"
-        "  -c <count>     stop after N refills (default: run until Ctrl-C)\n"
+        "usage: %s [options] [uri]\n"
+        "  -n <samples>   buffer size in IIO samples of 4 B (default: %d;\n"
+        "                 536 samples = 2144 B = exactly one frame)\n"
+        "  -c <count>     stop after this many refills (default: unlimited)\n"
         "  -d <dev>       device name (default: %s)\n"
-        "  -h             this help\n"
-        "\n"
-        "uri               libiio context URI (default: local:)\n"
-        "                  e.g. 'ip:10.73.1.16' to connect remotely\n"
-        "\n",
+        "  -t <ms>        refill timeout in ms; 0 = no timeout (block forever,\n"
+        "                 NOT Ctrl-C-able while blocked — prefer -t 5000 -k)\n"
+        "  -k             keep retrying on refill timeout instead of exiting\n"
+        "  -w <file>      write raw soft bytes to <file> (opv-decode -3 layout)\n"
+        "  uri            libiio context uri, e.g. ip:10.73.1.16 (default: local)\n",
         prog, DEFAULT_BUFFER_SAMPLES, DEFAULT_RX_DEV);
 }
 
-int main(int argc, char *argv[])
+int main(int argc, char **argv)
 {
     /* Defaults */
     size_t buffer_samples = DEFAULT_BUFFER_SAMPLES;
-    long refill_count = 0; /* 0 = unlimited */
+    long refill_count = 0;      /* 0 = unlimited */
+    long timeout_ms = -1;       /* -1 = library default; 0 = no timeout */
+    bool keep_going = false;    /* retry (not exit) on refill timeout */
     const char *device_name = DEFAULT_RX_DEV;
+    const char *capture_path = NULL;
     const char *uri = NULL;
 
     /* Parse args */
     int opt;
-    while ((opt = getopt(argc, argv, "n:c:d:h")) != -1) {
+    while ((opt = getopt(argc, argv, "n:c:d:t:w:kh")) != -1) {
         switch (opt) {
             case 'n': buffer_samples = (size_t)atol(optarg); break;
             case 'c': refill_count = atol(optarg); break;
             case 'd': device_name = optarg; break;
+            case 't': timeout_ms = atol(optarg); break;
+            case 'w': capture_path = optarg; break;
+            case 'k': keep_going = true; break;
             case 'h': print_usage(argv[0]); return 0;
             default:  print_usage(argv[0]); return 1;
         }
@@ -219,12 +218,25 @@ int main(int argc, char *argv[])
     /* Set up Ctrl-C handler */
     signal(SIGINT, on_sigint);
 
+    /* Optional capture file */
+    FILE *capture = NULL;
+    size_t capture_bytes = 0;
+    if (capture_path) {
+        capture = fopen(capture_path, "wb");
+        if (!capture) {
+            fprintf(stderr, "failed to open capture file '%s'\n", capture_path);
+            return 1;
+        }
+        fprintf(stderr, "capture: writing raw soft bytes to %s\n", capture_path);
+    }
+
     /* Create libiio context */
     struct iio_context *ctx;
     if (uri) {
         ctx = iio_create_context_from_uri(uri);
         if (!ctx) {
             fprintf(stderr, "failed to create context from uri '%s'\n", uri);
+            if (capture) fclose(capture);
             return 1;
         }
         fprintf(stderr, "libiio: connected to %s\n", uri);
@@ -232,6 +244,7 @@ int main(int argc, char *argv[])
         ctx = iio_create_default_context();
         if (!ctx) {
             fprintf(stderr, "failed to create default libiio context\n");
+            if (capture) fclose(capture);
             return 1;
         }
         fprintf(stderr, "libiio: using default (local) context\n");
@@ -240,26 +253,39 @@ int main(int argc, char *argv[])
     fprintf(stderr, "libiio: context has %u devices\n",
             iio_context_get_devices_count(ctx));
 
+    /* Optional refill timeout override. 0 disables the timeout entirely
+     * (refill blocks until data arrives; uninterruptible while blocked). */
+    if (timeout_ms >= 0) {
+        int terr = iio_context_set_timeout(ctx, (unsigned int)timeout_ms);
+        if (terr != 0)
+            fprintf(stderr, "warning: iio_context_set_timeout(%ld) failed (%d)\n",
+                    timeout_ms, terr);
+        else
+            fprintf(stderr, "libiio: refill timeout %s\n",
+                    timeout_ms == 0 ? "disabled (block forever)" : "set");
+    }
+
     /* Find the RX device */
     struct iio_device *rx_dev = iio_context_find_device(ctx, device_name);
     if (!rx_dev) {
         fprintf(stderr, "device '%s' not found in context\n", device_name);
         iio_context_destroy(ctx);
+        if (capture) fclose(capture);
         return 1;
     }
 
-    /* Find I and Q channels.
-     * ADRV9002 uses voltage0_i / voltage0_q (not voltage0 / voltage1 like AD9361). */
+    /* Enable the device's channels so buffer creation succeeds. The
+     * channel format (2x int16 "IQ") is the ADC driver's vestigial
+     * self-image; the payload is soft-bit bytes and we walk it raw. */
     struct iio_channel *rx_ch_i = iio_device_find_channel(rx_dev, "voltage0_i", false);
     struct iio_channel *rx_ch_q = iio_device_find_channel(rx_dev, "voltage0_q", false);
     if (!rx_ch_i || !rx_ch_q) {
         fprintf(stderr, "could not find voltage0_i (I) or voltage0_q (Q) channel on %s\n",
                 device_name);
         iio_context_destroy(ctx);
+        if (capture) fclose(capture);
         return 1;
     }
-
-    /* Enable both channels */
     iio_channel_enable(rx_ch_i);
     iio_channel_enable(rx_ch_q);
 
@@ -268,60 +294,61 @@ int main(int argc, char *argv[])
     if (!buf) {
         fprintf(stderr, "failed to create buffer of %zu samples\n", buffer_samples);
         iio_context_destroy(ctx);
+        if (capture) fclose(capture);
         return 1;
     }
-    fprintf(stderr, "libiio: created buffer for %zu samples (~%zu bytes per refill)\n",
-            buffer_samples, buffer_samples * 4);
 
-    /* Print sample-rate info if available */
-    long long fs_hz = 0;
-    if (iio_device_attr_read_longlong(rx_dev, "in_voltage_sampling_frequency",
-                                       &fs_hz) == 0) {
-        double dur_per_refill = (double)buffer_samples / fs_hz;
-        fprintf(stderr, "libiio: sample rate %.3f Msps → each refill covers %.2f ms\n",
-                fs_hz / 1e6, dur_per_refill * 1000);
-    }
+    size_t buffer_bytes = buffer_samples * 4;
+    fprintf(stderr,
+        "libiio: buffer %zu samples = %zu B (%.2f frames at %d soft B/frame)\n"
+        "stream: demod 3-bit soft bits, 1 byte each; bursty — ~%.1f kB/s while\n"
+        "stream: frame-locked at 25 fps, silent otherwise (timeouts = no frames)\n",
+        buffer_samples, buffer_bytes,
+        (double)buffer_bytes / FRAME_SOFT_BYTES, FRAME_SOFT_BYTES,
+        FRAME_SOFT_BYTES * 25.0 / 1000.0);
 
     /* Main refill loop */
     long refills_done = 0;
     struct stats s;
-    struct timespec t0, t1, t_refill_start;
+    struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
     fprintf(stderr, "\n--- starting refill loop (Ctrl-C to stop) ---\n");
 
     while (!stop_requested) {
-        clock_gettime(CLOCK_MONOTONIC, &t_refill_start);
         ssize_t nbytes = iio_buffer_refill(buf);
         clock_gettime(CLOCK_MONOTONIC, &t1);
+        double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
 
         if (nbytes < 0) {
             char errbuf[128];
             iio_strerror((int)-nbytes, errbuf, sizeof(errbuf));
+            if (keep_going && (int)-nbytes == ETIMEDOUT) {
+                fprintf(stderr, "[%.3fs] refill timeout — no frames yet, "
+                        "retrying (-k)\n", elapsed);
+                continue;
+            }
             fprintf(stderr, "iio_buffer_refill failed: %s\n", errbuf);
             break;
         }
 
-        /* Walk the buffer extracting (I, Q) pairs.
-         * AXI-ADC delivers 4 bytes per sample: int16 I, int16 Q (little-endian) */
+        /* Walk the buffer as raw soft-bit bytes. */
+        const uint8_t *p = (const uint8_t *)iio_buffer_start(buf);
+
         stats_reset(&s);
-        s.total_bytes = (size_t)nbytes;
+        stats_update(&s, p, (size_t)nbytes);
+        stats_print(&s, elapsed, stderr);
 
-        char *p_start = iio_buffer_first(buf, rx_ch_i);
-        char *p_end   = iio_buffer_end(buf);
-        ptrdiff_t step = iio_buffer_step(buf);
-
-        for (char *p = p_start; p < p_end; p += step) {
-            int16_t I = ((int16_t *)p)[0];
-            int16_t Q = ((int16_t *)p)[1];
-            stats_update(&s, I, Q);
+        if (capture && nbytes > 0) {
+            size_t wr = fwrite(p, 1, (size_t)nbytes, capture);
+            capture_bytes += wr;
+            if (wr != (size_t)nbytes) {
+                fprintf(stderr, "capture: short write (%zu of %zu B) — stopping\n",
+                        wr, (size_t)nbytes);
+                break;
+            }
+            fflush(capture);
         }
-
-        double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
-        double refill_dur = (t1.tv_sec - t_refill_start.tv_sec)
-                          + (t1.tv_nsec - t_refill_start.tv_nsec) / 1e9;
-
-        stats_print(&s, elapsed, refill_dur, stderr);
 
         refills_done++;
         if (refill_count > 0 && refills_done >= refill_count) {
@@ -332,6 +359,12 @@ int main(int argc, char *argv[])
 
     fprintf(stderr, "\n--- shutting down ---\n");
     fprintf(stderr, "total refills: %ld\n", refills_done);
+    if (capture) {
+        fclose(capture);
+        fprintf(stderr, "capture: %zu B written to %s (%.2f frames)\n",
+                capture_bytes, capture_path,
+                (double)capture_bytes / FRAME_SOFT_BYTES);
+    }
 
     iio_buffer_destroy(buf);
     iio_context_destroy(ctx);
