@@ -99,7 +99,7 @@ DM_I_SHIFT=0x14              # 20   <-- SWEEP (keep = P_SHIFT + 3)
 
 # rx_invert (CONTROL bit0): 0 = normal soft-bit polarity. If cst_lock comes up
 # but frames stay at 0, set this to 0x1 — the "I/Q backwards" one-bit toggle.
-DM_CONTROL=0x00000001
+DM_CONTROL=0x00000000
 
 # symbol-lock detector params (reset 128/8, matched to TB)
 DM_SYM_LOCK_COUNT=0x00000080   # 128  window
