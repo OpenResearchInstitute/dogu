@@ -81,6 +81,17 @@
 #define DEFAULT_BUFFER_SAMPLES  4096        /* IIO samples (4 B each) */
 #define DEFAULT_RX_DEV          "axi-adrv9002-rx-lpc"
 
+/* HARDWARE FORMAT CONTRACT (measured 2026-07-21, OTA capture forensics):
+ * axis_softbit_widen zero-extends each 3-bit soft to a 16-BIT word
+ * (OUT_WIDTH := 16, the axi_dmac floor). In DRAM, little-endian, every
+ * soft therefore occupies TWO bytes: [soft][0x00]. This tool previously
+ * walked the buffer 1 byte/soft and saw phantom zero-stuffing (75/25
+ * histogram) that broke opv-decode. PARTIAL_XFER_LEN counts 16-bit
+ * beats, not bytes -- the original "4288 = 2 frames" calibration read
+ * the right number in the wrong units. De-stuffed output (1 byte/soft)
+ * is written to -w so opv-decode -3 consumes it unchanged. */
+#define SOFT_WORD_BYTES 2   /* DMA bytes per soft value (widen OUT_WIDTH/8) */
+
 /* 40 ms x 54,200 baud = 2168 symbols; minus 24-bit sync word = 2144
  * payload soft bits per frame, one byte each after the widener. */
 #define FRAME_SOFT_BYTES        2144
@@ -112,8 +123,11 @@ static void stats_reset(struct stats *s)
 
 static void stats_update(struct stats *s, const uint8_t *p, size_t n)
 {
-    s->total_bytes += n;
-    for (size_t i = 0; i < n; i++) {
+    /* n is raw DMA bytes; softs live in the LOW byte of each LE 16-bit
+     * word. The high byte must be zero -- count violations as oor. */
+    s->total_bytes += n / SOFT_WORD_BYTES;   /* count SOFTS, not DMA bytes */
+    for (size_t i = 0; i + 1 < n; i += SOFT_WORD_BYTES) {
+        if (p[i+1] != 0) { if (!s->oor_count) s->oor_example = p[i+1]; s->oor_count++; }
         uint8_t v = p[i];
         if (v < 8) {
             s->hist[v]++;
@@ -301,7 +315,7 @@ int main(int argc, char **argv)
     size_t buffer_bytes = buffer_samples * 4;
     fprintf(stderr,
         "libiio: buffer %zu samples = %zu B (%.2f frames at %d soft B/frame)\n"
-        "stream: demod 3-bit soft bits, 1 byte each; bursty — ~%.1f kB/s while\n"
+        "stream: demod 3-bit softs, 16-bit DMA words (low byte data); bursty — ~%.1f kB/s while\n"
         "stream: frame-locked at 25 fps, silent otherwise (timeouts = no frames)\n",
         buffer_samples, buffer_bytes,
         (double)buffer_bytes / FRAME_SOFT_BYTES, FRAME_SOFT_BYTES,
@@ -340,11 +354,14 @@ int main(int argc, char **argv)
         stats_print(&s, elapsed, stderr);
 
         if (capture && nbytes > 0) {
-            size_t wr = fwrite(p, 1, (size_t)nbytes, capture);
-            capture_bytes += wr;
-            if (wr != (size_t)nbytes) {
-                fprintf(stderr, "capture: short write (%zu of %zu B) — stopping\n",
-                        wr, (size_t)nbytes);
+            /* de-stuff: one byte per soft into the capture file */
+            size_t nw = 0;
+            for (ssize_t i = 0; i + 1 < nbytes; i += SOFT_WORD_BYTES)
+                nw += fwrite(&p[i], 1, 1, capture);
+            capture_bytes += nw;
+            if (nw != (size_t)nbytes / SOFT_WORD_BYTES) {
+                fprintf(stderr, "capture: short write (%zu of %zu softs) — stopping\n",
+                        nw, (size_t)nbytes / SOFT_WORD_BYTES);
                 break;
             }
             fflush(capture);
