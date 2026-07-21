@@ -79,6 +79,15 @@ DEMOD_BASE=0x84A80000
 #   0x080 CST_LOCKTIME_F1 0x084 CST_LOCKTIME_F2  (RO)
 #   0x088 LOCK_STATUS(b0 lk_f1,b1 lk_f2,b2 unlk_f1,b3 unlk_f2)
 #   0x08C CST_ACC_I_F1  0x090 CST_ACC_Q_F1  0x094 CST_IQ_DELTA_F1 (RO)
+#   --- v6 map (VERSION 0x00060000+): MLSE sym-lock detector + CFO + timing ---
+#   NOTE: 0x010-0x020 LPF_* and 0x068-0x094 Costas telemetry are RETIRED in the
+#   MLSE demod (registers exist; loops do not). Written only to match the TB.
+#   0x0A0 SYM_LOCK_STATUS(RO)  0x0A4 SYM_LOCK_THRESH(pct)
+#   0x0A8 SYM_UNLOCK_THRESH(pct)  0x0AC SYM_LOCK_WINDOW(log2)
+#   0x0B0 CFO_STATE(RO: 0=IDLE 1=SEARCH 2=CORRECTING 3=HELD 4=LOST)
+#   0x0B4 CFO_ESTIMATE(RO, Hz)  0x0B8 CFO_CTRL(b0 auto, acq/trk shifts)
+#   0x0BC CFO_MANUAL(Hz)        0x0C0 CFO_QUALITY(RO)
+#   0x0C4 TIM_ALPHA(Q16)  0x0C8 TIM_BETA(Q24)  0x0CC SYM_CLK_OFFSET(RO)
 
 # --- demod values to write ----------------------------------------------------
 # FREQ words: VERIFIED = -/+13550 Hz at 625 ksps (32-bit NCO). Compare against
@@ -87,23 +96,35 @@ DEMOD_BASE=0x84A80000
 DM_FREQ_F1=0xFA732DF5         # lower tone, -13550 Hz
 DM_FREQ_F2=0x058CD20B         # upper tone, +13550 Hz
 
-# LPF gains: STARTING POINTS TO SWEEP — NOT derived. With the mantissa pinned at
-# max, effective gain ~= 2^(23 - shift), so +1 to a shift halves the gain.
-# Brackets already tried: P/I shift 13/16 (hot), 20/29 (cold) — both failed.
-# Start mid, hold (I_SHIFT - P_SHIFT) = 3 so only bandwidth moves, then bisect.
-DM_P_GAIN=0x7FFFFF
-DM_I_GAIN=0x7FFFFF
-DM_ALPHA=0x000000            # restore nonzero
-DM_P_SHIFT=0x11              # 17   <-- SWEEP
-DM_I_SHIFT=0x14              # 20   <-- SWEEP (keep = P_SHIFT + 3)
+# LPF registers: DEAD in the MLSE demod (Costas-era; wired to nothing).
+# Values below are the TB's, written solely so hardware config == TB config
+# byte-for-byte. Do NOT sweep these; the 10-anomaly campaign already proved
+# they change nothing.
+DM_P_GAIN=0x000033
+DM_I_GAIN=0x000007
+DM_ALPHA=0x000000             # TB value
+DM_P_SHIFT=0x02               # TB value
+DM_I_SHIFT=0x0C               # TB value
 
-# rx_invert (CONTROL bit0): 0 = normal soft-bit polarity. If cst_lock comes up
+# rx_invert (CONTROL bit0): 0 = normal soft-bit polarity. If sym lock comes up
 # but frames stay at 0, set this to 0x1 — the "I/Q backwards" one-bit toggle.
 DM_CONTROL=0x00000000
 
 # symbol-lock detector params (reset 128/8, matched to TB)
 DM_SYM_LOCK_COUNT=0x00000080   # 128  window
 DM_SYM_LOCK_THR=0x00000008     #   8  threshold
+
+# --- v6 control plane: match TB writes 1130-1202 exactly. Reset defaults
+# mirror these values, but bring-up depends on NO reset defaults (doctrine).
+DM_GAIN_MANUAL=0x00000400      # 1.000 Q6.10 (TB)
+DM_RX_DISCARD=0x00000000       # 0, not 0x18 (TB)
+DM_SL_LOCK_PCT=0x00000019      # 25 pct (C++ LOCK_THRESH 0.25, verbatim)
+DM_SL_UNLOCK_PCT=0x00000032    # 50 pct (C++ UNLOCK_THRESH 0.50, verbatim)
+DM_SL_WINDOW=0x00000006        # log2 -> 64 symbols (TB)
+DM_CFO_CTRL=0x00060A01         # acq_shift 6, trk_shift 10, b0 auto=1 (TB)
+DM_CFO_MANUAL=0x00000000       # 0 Hz (TB)
+DM_TIM_ALPHA=0x00000148        # 328 Q16 (C++ 0.005)
+DM_TIM_BETA=0x000000A8         # 168 Q24 (C++ 1e-5)
 
 # --- quant thresholds: 3-bit soft bin edges. GOLDEN RULE (opv_demod.hpp
 # FrameDecoder, verified against the fabric quantize()): thr_k = mean|soft|*k/3.5,
@@ -201,7 +222,8 @@ else
     fi
     echo "[5/7] demod VERSION = $DVER  (looks like demod — base OK)"
     case "$DVER" in
-        0x00050000) echo "      VERSION 0x00050000 — expanded map confirmed (new bitstream)." ;;
+        0x00060000) echo "      VERSION 0x00060000 — v6 map confirmed (MLSE + CFO AFC + timing loop)." ;;
+        0x00050000) echo "      *** WARNING: VERSION 0x00050000 = pre-CFO bitstream (no AFC). ***" >&2 ;;
         0x00040000) echo "      *** WARNING: VERSION 0x00040000 = PRE-EXPANSION bitstream. ***" >&2
                     echo "          New control plane + quant_thr wiring are NOT present —" >&2
                     echo "          you are likely on the stale ipshared copy. Re-package + re-synth." >&2 ;;
@@ -227,6 +249,15 @@ else
     D_ACC_I=$((DEMOD_BASE + 0x08C));    D_ACC_Q=$((DEMOD_BASE + 0x090));    D_IQ_DELTA=$((DEMOD_BASE + 0x094))
     # symbol lock resolve + write (beside the others)
     D_SYM_CNT=$((DEMOD_BASE + 0x024));  D_SYM_THR=$((DEMOD_BASE + 0x028))
+    # --- v6 map (VERSION 0x00060000+) ---
+    D_GAIN_MANUAL=$((DEMOD_BASE + 0x030)); D_RX_DISCARD=$((DEMOD_BASE + 0x064))
+    D_SL_STATUS=$((DEMOD_BASE + 0x0A0));   D_SL_LOCK=$((DEMOD_BASE + 0x0A4))
+    D_SL_UNLOCK=$((DEMOD_BASE + 0x0A8));   D_SL_WINDOW=$((DEMOD_BASE + 0x0AC))
+    D_CFO_STATE=$((DEMOD_BASE + 0x0B0));   D_CFO_EST=$((DEMOD_BASE + 0x0B4))
+    D_CFO_CTRL=$((DEMOD_BASE + 0x0B8));    D_CFO_MANUAL=$((DEMOD_BASE + 0x0BC))
+    D_CFO_QUAL=$((DEMOD_BASE + 0x0C0))
+    D_TIM_ALPHA=$((DEMOD_BASE + 0x0C4));   D_TIM_BETA=$((DEMOD_BASE + 0x0C8))
+    D_SYM_CLK_OFF=$((DEMOD_BASE + 0x0CC))
 
     echo "[6/7] demod live values BEFORE write (the real reset defaults):"
     printf "      FREQ_F1=%s FREQ_F2=%s\n" "$(devmem $D_FREQ_F1)" "$(devmem $D_FREQ_F2)"
@@ -234,41 +265,49 @@ else
     printf "      P_SHIFT=%s I_SHIFT=%s\n" "$(devmem $D_P_SHIFT)" "$(devmem $D_I_SHIFT)"
     printf "      SYM_CNT=%s SYM_THR=%s\n" "$(devmem $D_SYM_CNT)" "$(devmem $D_SYM_THR)"
 
-    echo "[7/7] writing demod config (FREQ verified; gains = sweep points)"
+    echo "[7/7] writing demod config (TB order, TB values: tb_haifuraiya_channelizer_axi 1130-1202)"
+    # TB order: hold DEMOD_INIT=1 through config, release last.
+    devmem $D_DEMOD_INIT 32 0x00000001
+    devmem $D_CONTROL 32 $DM_CONTROL
     devmem $D_FREQ_F1 32 $DM_FREQ_F1
     devmem $D_FREQ_F2 32 $DM_FREQ_F2
+    # dead LPF quintet — TB parity only (see map note)
     devmem $D_P_GAIN  32 $DM_P_GAIN
     devmem $D_I_GAIN  32 $DM_I_GAIN
     devmem $D_ALPHA   32 $DM_ALPHA
     devmem $D_P_SHIFT 32 $DM_P_SHIFT
     devmem $D_I_SHIFT 32 $DM_I_SHIFT
-    devmem $D_CONTROL 32 $DM_CONTROL
-
-    # frame-sync hunt/verify thresholds — match the TB
-    devmem $D_FS_HUNT   32 $DM_FS_HUNT_THR
-    devmem $D_FS_VERIFY 32 $DM_FS_VERIFY_THR
-
-    # symbol-lock detector params — match the TB
     devmem $D_SYM_CNT 32 $DM_SYM_LOCK_COUNT
     devmem $D_SYM_THR 32 $DM_SYM_LOCK_THR
-
-    # quant thresholds — now reach the frame_sync soft quantizer
+    devmem $D_GAIN_MANUAL 32 $DM_GAIN_MANUAL
+    devmem $D_RX_DISCARD  32 $DM_RX_DISCARD
+    # MLSE symbol-lock detector (percent thresholds + window)
+    devmem $D_SL_LOCK   32 $DM_SL_LOCK_PCT
+    devmem $D_SL_UNLOCK 32 $DM_SL_UNLOCK_PCT
+    devmem $D_SL_WINDOW 32 $DM_SL_WINDOW
+    # CFO AFC: auto mode armed, manual word zero
+    devmem $D_CFO_CTRL   32 $DM_CFO_CTRL
+    devmem $D_CFO_MANUAL 32 $DM_CFO_MANUAL
+    # symbol timing loop
+    devmem $D_TIM_ALPHA 32 $DM_TIM_ALPHA
+    devmem $D_TIM_BETA  32 $DM_TIM_BETA
+    # soft quantizer + frame-sync thresholds
     devmem $D_QUANT_1 32 $DM_QUANT_THR_1
     devmem $D_QUANT_2 32 $DM_QUANT_THR_2
     devmem $D_QUANT_3 32 $DM_QUANT_THR_3
+    devmem $D_FS_HUNT   32 $DM_FS_HUNT_THR
+    devmem $D_FS_VERIFY 32 $DM_FS_VERIFY_THR
     # loop control (rx_enable=1, not frozen/zeroed)
     devmem $D_LOOP_CTRL 32 $DM_LOOP_CTRL
-    echo "      done. P_SHIFT=$DM_P_SHIFT I_SHIFT=$DM_I_SHIFT ALPHA=$DM_ALPHA"
-    echo "      quant_thr=$DM_QUANT_THR_1/$DM_QUANT_THR_2/$DM_QUANT_THR_3  loop_ctrl=$DM_LOOP_CTRL"
-
-    # Clean re-init AFTER channelizer is up + demod configured: pulse DEMOD_INIT
-    # (1 -> 0) so the carrier loops start fresh on the stable channel output. This
-    # is the lever the channelizer soft-reset never reached. Back-to-back writes
-    # hold init for several ms (thousands of clocks) — no fractional sleep needed.
-    # On a pre-0x50000 bitstream 0x05C is unmapped; the writes are harmlessly ignored.
-    devmem $D_DEMOD_INIT 32 0x00000001
+    # release onto the live channel output — the TB's final config act
     devmem $D_DEMOD_INIT 32 0x00000000
-    echo "      demod re-init pulsed (DEMOD_INIT 1->0)."
+    echo "      done. quant_thr=$DM_QUANT_THR_1/$DM_QUANT_THR_2/$DM_QUANT_THR_3  loop_ctrl=$DM_LOOP_CTRL"
+    echo "      config readback (armed state into the transcript):"
+    printf "      CFO_CTRL=%s (expect $DM_CFO_CTRL)  CFO_STATE=%s (expect 0x0/0x1 pre-carrier)\n" \
+        "$(devmem $(printf '0x%X' $D_CFO_CTRL))" "$(devmem $(printf '0x%X' $D_CFO_STATE))"
+    printf "      CFO_EST=%s  CFO_QUAL=%s  TIM_ALPHA=%s  TIM_BETA=%s\n" \
+        "$(devmem $(printf '0x%X' $D_CFO_EST))" "$(devmem $(printf '0x%X' $D_CFO_QUAL))" \
+        "$(devmem $(printf '0x%X' $D_TIM_ALPHA))" "$(devmem $(printf '0x%X' $D_TIM_BETA))"
 fi
 
 # =============================================================================
@@ -281,14 +320,14 @@ echo "1) Signal placement (key OPV on/off; ch59 should rise, ch5 stay low):"
 echo "   while true; do printf 'ch59='; devmem $CH_POW_CH59; printf ' ch5='; devmem $CH_POW_CH5; echo; sleep 0.3; done"
 if [ -n "$D_STATUS" ]; then
     echo ""
-    echo "2) Demod lock (STATUS b0=fsync b1=cst_f1 b2=cst_f2) + frames:"
+    echo "2) Demod lock (STATUS b0=fsync; b1/b2 are retired Costas bits — ignore) + frames:"
     echo "   while true; do printf 'STATUS='; devmem $(printf '0x%X' $D_STATUS); printf ' FRAMES='; devmem $(printf '0x%X' $D_FRAMES); echo; sleep 0.3; done"
     echo ""
-    echo "3) Carrier drift — f1/f2 NCO adjust (wander apart = decoupled loops, the sim question):"
-    echo "   while true; do printf 'f1_nco='; devmem $(printf '0x%X' $D_F1_NCO); printf ' f2_nco='; devmem $(printf '0x%X' $D_F2_NCO); echo; sleep 0.3; done"
+    echo "3) CFO AFC watch (STATE 0=IDLE 1=SEARCH 2=CORRECTING 3=HELD 4=LOST; EST in Hz):"
+    echo "   while true; do printf 'CFO_STATE='; devmem $(printf '0x%X' $D_CFO_STATE); printf ' EST='; devmem $(printf '0x%X' $D_CFO_EST); printf ' QUAL='; devmem $(printf '0x%X' $D_CFO_QUAL); echo; sleep 0.2; done"
     echo ""
-    echo "4) Loop scoreboard (LOCK b0/1=lock_f1/2 b2/3=unlock_f1/2):"
-    echo "   while true; do printf 'LOCK='; devmem $(printf '0x%X' $D_LOCK_STATUS); printf ' f1err='; devmem $(printf '0x%X' $D_F1_ERR); printf ' lpf1='; devmem $(printf '0x%X' $D_LPF_ACC_F1); printf ' lt1='; devmem $(printf '0x%X' $D_LOCKTIME_F1); echo; sleep 0.3; done"
+    echo "4) Symbol lock (measured, 0x0A0) + symbol clock offset (Q24, 0x0CC):"
+    echo "   while true; do printf 'SYM_LOCK='; devmem $(printf '0x%X' $D_SL_STATUS); printf ' CLK_OFF='; devmem $(printf '0x%X' $D_SYM_CLK_OFF); echo; sleep 0.3; done"
     echo ""
     echo "5) Re-init the demod (recover from lock loss — NO bitstream reload):"
     echo "   devmem $(printf '0x%X' $D_DEMOD_INIT) 32 1; devmem $(printf '0x%X' $D_DEMOD_INIT) 32 0"
@@ -296,7 +335,8 @@ if [ -n "$D_STATUS" ]; then
     echo ""
     echo "6) fs_hunt=$DM_FS_HUNT_THR fs_verify=$DM_FS_VERIFY_THR  quant=$DM_QUANT_THR_1/$DM_QUANT_THR_2/$DM_QUANT_THR_3"
     echo "   Quant threshold tuning (LIVE, iterative — soft bin edges to decoder):"
-    echo "   devmem $(printf '0x%X' $D_IQ_DELTA)        # soft metric magnitude while locked (gauge the edges)"
+    echo "   # NOTE: CST_IQ_DELTA (0x094) is a Costas cal tap; may be undriven in MLSE."
+    echo "   # Gauge mean|soft| from frame_decoder soft dumps instead, thr = mean*{1,2,3}/3.5."
     echo "   devmem $(printf '0x%X' $D_QUANT_1) 32 <t1>; devmem $(printf '0x%X' $D_QUANT_2) 32 <t2>; devmem $(printf '0x%X' $D_QUANT_3) 32 <t3>"
     echo "7) Symbol-lock tuning (no direct readout — sweep, watch frames react):"
     echo "   # carrier must already be locked (STATUS b1/b2=1). Then sweep the threshold:"
