@@ -129,7 +129,7 @@ DM_TIM_BETA=0x000000A8         # 168 Q24 (C++ 1e-5)
 # --- quant thresholds: 3-bit soft bin edges. GOLDEN RULE (opv_demod.hpp
 # FrameDecoder, verified against the fabric quantize()): thr_k = mean|soft|*k/3.5,
 # i.e. a 1:2:3 spacing. Sim measured mean|soft| = 17297 at 8 dB WITH THE
-# NORMALIZER ACTIVE (GAIN_TARGET=16000, rail 32768) -> 4942/9884/14826.
+# NORMALIZER ACTIVE (GAIN_TARGET=9000 (RTL constant NORM_TARGET, haifuraiya_channelizer_axi.vhd), rail 32768) -> 4942/9884/14826.
 #
 # ASSUMPTION: the per-channel normalizer is ACTIVE on hardware, so the hw soft
 # scale matches sim. If it is NOT (raw channel amplitude), the hw soft rails
