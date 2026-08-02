@@ -123,8 +123,8 @@ DM_SL_UNLOCK_PCT=0x00000032    # 50 pct (C++ UNLOCK_THRESH 0.50, verbatim)
 DM_SL_WINDOW=0x00000006        # log2 -> 64 symbols (TB)
 DM_CFO_CTRL=0x00060A01         # acq_shift 6, trk_shift 10, b0 auto=1 (TB)
 DM_CFO_MANUAL=0x00000000       # 0 Hz (TB)
-DM_TIM_ALPHA=0x00000148        # 328 Q16 (C++ 0.005)
-DM_TIM_BETA=0x000000A8         # 168 Q24 (C++ 1e-5)
+DM_TIM_ALPHA=0x00000500        # certified: closed-loop sweep + 6/6 x2 at 19 ppm
+DM_TIM_BETA=0x00000022         #
 
 # --- quant thresholds: 3-bit soft bin edges. GOLDEN RULE (opv_demod.hpp
 # FrameDecoder, verified against the fabric quantize()): thr_k = mean|soft|*k/3.5,
