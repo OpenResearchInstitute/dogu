@@ -118,8 +118,24 @@ DM_SYM_LOCK_THR=0x00000008     #   8  threshold
 # mirror these values, but bring-up depends on NO reset defaults (doctrine).
 DM_GAIN_MANUAL=0x00000400      # 1.000 Q6.10 (TB)
 DM_RX_DISCARD=0x00000000       # 0, not 0x18 (TB)
-DM_SL_LOCK_PCT=0x00000019      # 25 pct (C++ LOCK_THRESH 0.25, verbatim)
-DM_SL_UNLOCK_PCT=0x00000032    # 50 pct (C++ UNLOCK_THRESH 0.50, verbatim)
+
+
+DM_SL_LOCK_PCT=0x00000005      # 5 pct: sym-lock asserts when the timing-error
+                               # statistic (spread of the TED over the lock
+                               # window, as a percentage) falls BELOW this.
+                               # Measured on hardware (walkthrough 7.2):
+                               # signal ~0.87 pct, noise ~14.34 pct. 5 sits
+                               # in the gap. Verified OTA 2026-08-02: locks
+                               # on signal, drops on dead air.
+DM_SL_UNLOCK_PCT=0x0000000A    # 10 pct: unlock when the statistic rises
+                               # ABOVE this. Hysteresis pair with LOCK=5.
+                               # (The old 25/50, labeled C++ verbatim,
+                               # was wrong twice: the C++ 0.25/0.50 are
+                               # normalized-variance thresholds on a
+                               # different statistic, and both values sat
+                               # above the noise floor, so lock asserted
+                               # on anything; gating was inert.)
+
 DM_SL_WINDOW=0x00000006        # log2 -> 64 symbols (TB)
 DM_CFO_CTRL=0x00060A01         # acq_shift 6, trk_shift 10, b0 auto=1 (TB)
 DM_CFO_MANUAL=0x00000000       # 0 Hz (TB)
