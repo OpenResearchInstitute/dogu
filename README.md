@@ -130,11 +130,18 @@ doesn't complain about libiio's transitive dependencies (libusb,
 libavahi, libxml2, libserialport) — those resolve at runtime on the
 target.
 
-The PetaLinux SDK is also a valid toolchain+sysroot source — build it
-(`petalinux-build --sdk`), install it, source its environment-setup
-script, and `make` picks up `CC` and the sysroot automatically. This is
-the most ABI-rigorous option since the SDK is generated from the same
-project that builds the target rootfs.
+The PetaLinux SDK may be needed with a fresh install. It is also a 
+valid toolchain+sysroot source — build it (`petalinux-build --sdk`), 
+install it, source its environment-setup script, and `make` picks 
+up `CC` and the sysroot automatically. This is the most ABI-rigorous 
+option since the SDK is generated from the same project that builds 
+the target rootfs.
+
+```
+cd ~/purple/Mode-Dynamic-Transponder/haifuraiya/petalinux/haifuraiya
+petalinux-build --sdk
+./images/linux/sdk.sh -d ~/petalinux-sdk
+```
 
 ## Switching between native and cross builds
 
