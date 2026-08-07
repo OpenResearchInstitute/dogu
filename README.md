@@ -48,6 +48,18 @@ dogu/
 - 🚧 `services/*` — design phase
 - 🚧 `yocto/*` — design phase
 
+## Cloning
+
+There is a submodule involved. Dogu pulls in the C++ modem repository 
+and uses that code to build `frame_decoder`. 
+
+```
+git clone https://github.com/OpenResearchInstitute/dogu
+cd ~/dogu
+git submodule status        # a leading '-' means uninitialized
+git submodule update --init --recursive
+```
+
 ## Building
 
 dōgu uses a unified build system. From the repo root:
