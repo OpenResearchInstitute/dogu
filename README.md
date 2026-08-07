@@ -26,6 +26,8 @@ ADRV-based radios.
 dogu/
 ├── tools/                Standalone diagnostic / development utilities
 │   └── dma_listen/         Validate libiio + AXI-ADC DMA path
+|   └── frame_send/         Intermediate test - send frames to Interlocutor
+|   └── seam_grade/         Grade the quality of the demodulated frames
 ├── liboriinit/           ADRV9001/9002 init library (chip configuration
 │                         + safe-state enforcement via libiio)
 ├── frame_decoder/        A53 OPV frame decoder (opv-cxx-demod submodule):
@@ -37,16 +39,36 @@ dogu/
 
 ## Status
 
-- ✅ `tools/dma_listen` — PS↔PL DMA path validator. Verified working on
-  ZCU102+ADRV9002.
+## Status
+- ✅ `tools/dma_listen` — PS↔PL DMA path validator and soft-bit capture
+  tool. 16-bit DMA word contract aware (self-checking high-byte verify,
+  see WP_SOFTBIT_FORMAT_CONTRACT.md); writes de-stuffed captures in
+  opv-decode -3 layout. Verified working on ZCU102+ADRV9002.
+- ✅ `tools/frame_send` — intermediate test tool: send frames to
+  Interlocutor.
+- 🧪 `tools/seam_grade` — receiver quality grader for the periodic
+  frame-quality collapse (WP_SYMBOL_CLOCK_SLIP). Merges the dma_listen
+  arrival timeline with opv-decode -3 FEC metrics to classify every
+  40 ms slot OK / DEGRADED / ABSENT, measure the slip period in
+  wall-clock time, and render a PASS/FAIL verdict (`make test-seam`).
+  Rig verified end-to-end on dead air (stall watchdog, exit-code
+  taxonomy 0/1/2/3); first graded live capture pending.
 - ✅ `frame_decoder` — A53 `opv-decode` from the opv-cxx-demod submodule;
   cross-builds for aarch64, ships via `make deploy`, self-tests via
   `make test-frame-decoder`.
 - ✅ `liboriinit` v0.1 — chip-init library with state observation,
   safe-sequence calibrations (1T1R + 2T2R), and CLI. Profile-load
   function stubbed pending one more implementation pass.
-- 🚧 `services/*` — design phase
-- 🚧 `yocto/*` — design phase
+- ✅ `yocto/` — recipes packaging dogu components into PetaLinux images.
+  Bouro v0 (MQTT telemetry publisher + dashboard) ships this way and is
+  live on-target: bouro.service publishes channelizer telemetry via
+  devmem → mosquitto; the dashboard is served by mosquitto's websockets
+  listener at http://<target>:9001/bouro.html (no separate webserver —
+  the 9001 listener does both).
+- 🚧 `services/` — placeholder; not currently load-bearing. Service
+  definitions live with their yocto recipes (see Bouro). Retained for
+  future components that need staging before recipe-ization, or retire
+  it if that never materializes.
 
 ## Cloning
 
@@ -77,6 +99,8 @@ The full bring-it-fresh-to-the-board sequence is three commands:
 ```sh
 make clean && make cross && make deploy
 ```
+
+Check out `http://10.73.1.16:9001/bouro.html` to see MQTT driven web presentation of radio health.
 
 ### Cross-compile defaults
 
