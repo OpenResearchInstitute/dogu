@@ -1,21 +1,24 @@
-# opv_play -- VCK190 memory-loopback player/capturer.  Cross-built for the
-# A72s like dogu's other tools; dma-proxy.h is the copy vendored in the MDT
-# repo's PetaLinux recipe (BUFFER_SIZE 4 MB) and must match the module.
-CROSS_COMPILE ?= aarch64-linux-gnu-
-CC      := $(CROSS_COMPILE)gcc
-CFLAGS  ?= -O2 -Wall -Wextra -std=gnu11
-TARGET  := opv_play
+# dōgu tools/opv_play
+# VCK190 memory-loopback player/capturer: registers via /dev/uio0, stimulus
+# through /dev/dma_proxy_tx, soft bits from /dev/dma_proxy_rx.  Plain C, no
+# libiio -- honors dogu's CC/SYSROOT like frame_send so the top Makefile's
+# `native` and `cross` rules drive it the same as the other components.
+# dma-proxy.h is the copy vendored in the MDT repo's PetaLinux recipe
+# (BUFFER_SIZE 4 MB) and must match the module on the board.
 
-all: $(TARGET)
+CC      ?= cc
+CFLAGS  := -O2 -Wall -Wextra -std=gnu11
+ifneq ($(strip $(SYSROOT)),)
+  CFLAGS += --sysroot=$(SYSROOT)
+endif
 
-$(TARGET): opv_play.c dma-proxy.h
+.PHONY: all clean install
+all: opv_play
+opv_play: opv_play.c dma-proxy.h
 	$(CC) $(CFLAGS) -o $@ opv_play.c
 
-# host build for a syntax/semantics check only (no /dev/uio0 here)
-host: CROSS_COMPILE =
-host: $(TARGET)
-
 clean:
-	rm -f $(TARGET)
+	rm -f opv_play *.o
 
-.PHONY: all host clean
+install:
+	@true

@@ -4,7 +4,7 @@
 # Subdirectories that have something to build right now.
 # Add to this list as new components come online.
 SUBDIRS := tools/dma_listen liboriinit frame_decoder
-SUBDIRS := tools/dma_listen liboriinit frame_decoder tools/frame_send
+SUBDIRS := tools/dma_listen liboriinit frame_decoder tools/frame_send tools/opv_play
 
 # -----------------------------------------------------------------------
 # Cross-compile defaults — used by `make cross`.
@@ -44,6 +44,9 @@ CROSS_COMPILE    ?= $(XILINX_GNU_DIR)/aarch64-linux-gnu-
 # -----------------------------------------------------------------------
 DEPLOY_HOST      ?= root@10.73.1.16
 DEPLOY_PATH      ?= /home/root
+# The VCK190 memory-loopback board (no ADRV9002, no libiio): `make deploy-vck190`
+# ships only what runs there.  Override as for deploy.
+VCK190_HOST      ?= root@10.73.1.17
 
 # -----------------------------------------------------------------------
 # Self-test defaults — used by `make test-frame-decoder`.
@@ -54,7 +57,7 @@ DEPLOY_PATH      ?= /home/root
 TEST_FRAMES   ?= 20
 TEST_STATION  ?= W5NYV
 
-.PHONY: all native cross deploy clean install help test test-frame-decoder $(SUBDIRS)
+.PHONY: all native cross deploy deploy-vck190 clean install help test test-frame-decoder $(SUBDIRS)
 
 # Default: native build for host (matches pre-existing behavior).
 all: native
@@ -124,6 +127,24 @@ deploy:
 	@echo "  ssh $(DEPLOY_HOST) '$(DEPLOY_PATH)/opv-decode -q -r < test_soft.s16 | wc -c'   # 134 bytes/frame"
 	@echo "  make test-frame-decoder      # end-to-end: host-golden vs on-target decode"
 	@echo "  bring-up.sh tes_0231_Haifuraiya_FDD_LVDS_20Msps_10MHz"
+
+# Deploy to the VCK190 memory-loopback board: opv_play (the player/capturer)
+# and opv-decode (the A72 is aarch64 like the A53, same binary).  Nothing
+# ADRV9002-related goes -- there is no radio on that platform yet.
+deploy-vck190:
+	@if [ ! -x tools/opv_play/opv_play ]; then \
+		echo "ERROR: opv_play missing -- run 'make cross' first." >&2; exit 1; fi
+	@file tools/opv_play/opv_play | grep -q 'aarch64' || \
+	{ echo "ERROR: opv_play is not aarch64 -- run 'make clean && make cross'"; exit 1; }
+	@echo "==> Deploying to $(VCK190_HOST):$(DEPLOY_PATH)"
+	scp tools/opv_play/opv_play        $(VCK190_HOST):$(DEPLOY_PATH)/opv_play
+	@if [ -x frame_decoder/opv-decode ] && file frame_decoder/opv-decode | grep -q 'aarch64'; then \
+		scp frame_decoder/opv-decode   $(VCK190_HOST):$(DEPLOY_PATH)/opv-decode; \
+	else echo "    (opv-decode not cross-built; skipping)"; fi
+	@echo ""
+	@echo "Deploy complete. On the target:"
+	@echo "  ssh $(VCK190_HOST) 'ls /dev/uio0 /dev/dma_proxy_tx /dev/dma_proxy_rx'"
+	@echo "  ssh $(VCK190_HOST) '$(DEPLOY_PATH)/opv_play -i /tmp/stim.bin -o /tmp/soft.bin -q'"
 
 # -----------------------------------------------------------------------
 # Self-test: prove the deployed opv-decode runs on the A53 and produces the
@@ -208,5 +229,6 @@ help:
 	@echo "  make clean && make cross      # cross-compile for ZCU102 (aarch64)"
 	@echo "  make deploy                   # ship to the ZCU102"
 	@echo "  make clean && make cross && make deploy   # full rebuild + ship"
+	@echo "  make deploy-vck190            # ship opv_play (+ opv-decode) to the VCK190 (VCK190_HOST)"
 	@echo ""
 	@echo "Subdirectories: $(SUBDIRS)"

@@ -26,7 +26,11 @@
  *         the host to the grader's one-value-per-line text by
  *         opv_soft_bin2txt.py.
  *
- * Usage: opv_play -i stim.bin -o soft.bin [-f max_frames] [-q] [-v]
+ * Usage: opv_play -i stim.bin -o soft.bin [-f max_frames] [-L rx_bytes] [-q] [-v]
+ *   -L  bytes per receive transfer (default FRAME_SOFTS = one frame).  Debug
+ *       knob, 2026-10-25: the S2MM channel wedged after a frame that filled
+ *       its buffer exactly (2144 bytes + TLAST on the same beat).  4194304
+ *       makes the DMA end on TLAST only; 1072 makes it end on count only.
  *   -f  stop after this many frames (default: until 3 s with no frame)
  *   -q  print the readbacks (CFO estimate, symbol clock offset, frames) at
  *       the end
@@ -97,9 +101,11 @@
 #define DM_SOFT_DROPPED  0x0D0
 
 #define FRAME_SOFTS      2144    /* soft bits per frame (sync + payload) = bytes per RX transfer */
+#define RX_AHEAD         2       /* receive transfers kept outstanding (see the arming loop) */
 #define RX_IDLE_MS       3000    /* dma-proxy's own wait timeout; one timed-out RX = end of run */
 
 static int verbose = 0;
+static unsigned rx_bytes = FRAME_SOFTS;   /* -L */
 
 static volatile uint32_t *map_uio(int fd, int map, size_t len)
 {
@@ -172,7 +178,7 @@ static void readbacks(volatile uint32_t *ch, volatile uint32_t *dm)
 
 static int usage(const char *a)
 {
-    fprintf(stderr, "usage: %s -i stim.bin -o soft.bin [-f max_frames] [-q] [-v]\n", a);
+    fprintf(stderr, "usage: %s -i stim.bin -o soft.bin [-f max_frames] [-L rx_bytes] [-q] [-v]\n", a);
     return 1;
 }
 
@@ -180,17 +186,21 @@ int main(int argc, char **argv)
 {
     const char *in_path = NULL, *out_path = NULL;
     int max_frames = 0, want_readbacks = 0, opt;
-    while ((opt = getopt(argc, argv, "i:o:f:qv")) != -1) {
+    while ((opt = getopt(argc, argv, "i:o:f:L:qv")) != -1) {
         switch (opt) {
         case 'i': in_path = optarg; break;
         case 'o': out_path = optarg; break;
         case 'f': max_frames = atoi(optarg); break;
+        case 'L': rx_bytes = (unsigned)strtoul(optarg, NULL, 0); break;
         case 'q': want_readbacks = 1; break;
         case 'v': verbose = 1; break;
         default: return usage(argv[0]);
         }
     }
     if (!in_path || !out_path) return usage(argv[0]);
+    if (rx_bytes == 0 || rx_bytes > BUFFER_SIZE) {
+        fprintf(stderr, "-L must be 1..%u\n", (unsigned)BUFFER_SIZE); return 1;
+    }
 
     /* ---- stimulus ---- */
     int in_fd = open(in_path, O_RDONLY);
@@ -247,8 +257,17 @@ int main(int argc, char **argv)
     FILE *out = fopen(out_path, "wb");
     if (!out) { perror(out_path); return 1; }
 
-    for (int b = 0; b < BUFFER_COUNT; b++) {
-        rx[b].length = FRAME_SOFTS;
+    /* Arm only RX_AHEAD receive transfers, not all BUFFER_COUNT.  The Xilinx
+     * DMA driver sets the interrupt-coalescing threshold to the number of
+     * descriptors it starts as a batch: with 32 armed up front, frame 1
+     * completed alone (threshold 1) and then the remaining 31 were started as
+     * one batch -- no interrupt until 31 frames landed, and a run has 24.
+     * First hardware run with the DMA fix, 2026-10-25: exactly one frame
+     * delivered, the rest in DDR with nobody told.  Two outstanding (one
+     * active, one queued) keeps every batch at size 1; the receiver's
+     * 121-frame soft-bit FIFO covers the re-arm latency many times over. */
+    for (int b = 0; b < RX_AHEAD; b++) {
+        rx[b].length = rx_bytes;
         int id = b;
         if (ioctl(rx_fd, START_XFER, &id) < 0) { perror("START_XFER rx"); return 2; }
     }
@@ -266,11 +285,13 @@ int main(int argc, char **argv)
         int id = rx_id;
         if (ioctl(rx_fd, FINISH_XFER, &id) < 0) { perror("FINISH_XFER rx"); return 2; }
         if (rx[rx_id].status == PROXY_NO_ERROR) {
-            fwrite(rx[rx_id].buffer, 1, FRAME_SOFTS, out);
+            fwrite(rx[rx_id].buffer, 1, rx_bytes, out);
             frames++;
             if (verbose) fprintf(stderr, "  frame %d (rx buffer %d)\n", frames, rx_id);
-            rx[rx_id].length = FRAME_SOFTS;
-            if (ioctl(rx_fd, START_XFER, &id) < 0) { perror("START_XFER rx re-arm"); return 2; }
+            /* re-arm RX_AHEAD buffers ahead of the one just drained */
+            int next = (rx_id + RX_AHEAD) % BUFFER_COUNT;
+            rx[next].length = rx_bytes;
+            if (ioctl(rx_fd, START_XFER, &next) < 0) { perror("START_XFER rx re-arm"); return 2; }
             rx_id = (rx_id + 1) % BUFFER_COUNT;
             if (max_frames && frames >= max_frames) done = 1;
         } else if (rx[rx_id].status == PROXY_TIMEOUT) {
@@ -293,7 +314,7 @@ int main(int argc, char **argv)
     }
     double secs = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
     fprintf(stderr, "%d frames (%d soft bits) in %.2f s (includes the %d ms end-of-run timeout)\n",
-            frames, frames * FRAME_SOFTS, secs, RX_IDLE_MS);
+            frames, frames * (int)rx_bytes, secs, RX_IDLE_MS);
     if (want_readbacks) readbacks(ch, dm);
     return 0;
 }
