@@ -22,6 +22,18 @@ python3 ../../../sim/grade_payload_ber.py seam_chan_out.txt --stim-dir ../../../
 
 Pass = the same per-frame table the 25-frame xsim run gives (25/25, flat).
 
+Tier 2 (digital loopback: the same samples go through the ESIstream link and
+the GTY transceiver pair between the pacer and the receiver) uses the same
+command. When the tier-2 image is loaded the link block is `/dev/uio1`;
+`opv_play` then refuses to play until the link reports ready, and `-q` adds
+the link's own scoreboard: samples sent and received through the link and
+its three error counters. `opv_play -l` reads the link without playing
+(status bits, counters, and the transceiver clock measured against the PL
+clock -- 1.5625 when the board's SI570 has been set to 156.25 MHz, 1.0000
+when it is still at its power-up 100 MHz). Pass for tier 2 = the tier-1
+table, SAMPLES_SENT = SAMPLES_RCVD = the stimulus length, all error
+counters 0. Register map: `haifuraiya/platforms/vck190/rtl/esi/esi_link_hw.vhd`.
+
 The register bring-up is the simulation bench's Phase 2 sequence, register for
 register (`configure_receiver()` in the source), so the board is configured the
 way the acceptance run is. `-q` prints the readbacks (CFO estimate, symbol clock

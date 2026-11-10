@@ -11,6 +11,15 @@
  * simulation bench's (tb_haifuraiya_channelizer_axi.vhd, Phase 2), register
  * for register, so the board gets the configuration the acceptance run gets.
  *
+ * Tier 2 (digital loopback): the ESIstream link block (esi_link_hw,
+ * 0xA4030000) sits between the pacer and the receiver and is /dev/uio1,
+ * map0.  When it is present, opv_play refuses to play until the link
+ * reports ready and prints the link's own scoreboard with the readbacks:
+ * samples sent and received through the link and the three error counters.
+ * Pass for tier 2 = the tier-1 grade AND sent = received = the stimulus
+ * length AND zero errors.  -l reads the link and exits, without playing.
+ * Register map: haifuraiya/platforms/vck190/rtl/esi/esi_link_hw.vhd.
+ *
  * DMA: Xilinx dma-proxy (/dev/dma_proxy_tx, /dev/dma_proxy_rx; dma-proxy.h
  * from the PetaLinux recipe, BUFFER_SIZE 4 MB x 32 per channel).  The whole
  * stimulus is queued on the transmit ring up front; the receive ring takes
@@ -27,13 +36,15 @@
  *         opv_soft_bin2txt.py.
  *
  * Usage: opv_play -i stim.bin -o soft.bin [-f max_frames] [-L rx_bytes] [-q] [-v]
+ *        opv_play -l
  *   -L  bytes per receive transfer (default FRAME_SOFTS = one frame).  Debug
  *       knob, 2026-10-25: the S2MM channel wedged after a frame that filled
  *       its buffer exactly (2144 bytes + TLAST on the same beat).  4194304
  *       makes the DMA end on TLAST only; 1072 makes it end on count only.
  *   -f  stop after this many frames (default: until 3 s with no frame)
  *   -q  print the readbacks (CFO estimate, symbol clock offset, frames) at
- *       the end
+ *       the end -- and the ESIstream link's scoreboard when the link is there
+ *   -l  tier 2: print the ESIstream link status and counters, then exit
  *   -v  trace each DMA step
  *
  * Exit status 0 on a clean run, 1 on a usage/IO error, 2 on a DMA error.
@@ -99,6 +110,27 @@
 #define DM_TIM_BETA      0x0C8
 #define DM_SYM_CLK_OFF   0x0CC
 #define DM_SOFT_DROPPED  0x0D0
+
+/* ESIstream link block (esi_link_hw.vhd), tier 2 only, /dev/uio1 map0 */
+#define ESI_ID           0x000   /* 0x45534931 "ESI1" */
+#define ESI_CONTROL      0x004   /* bit0 link reset, bit1 sync req, bit2 stats clear, bit3 GT reset,
+                                    bits 6:4 loopback mode, bit7 snapshot (pulse bits read 0) */
+#define ESI_STATUS       0x008   /* see esi_status_bits[] */
+#define ESI_SAMPLES_SENT 0x00C   /* snapshot values from here on */
+#define ESI_SAMPLES_RCVD 0x010
+#define ESI_SEQ_ERRORS   0x014
+#define ESI_MARKER_ERRORS 0x018
+#define ESI_MULTI_ERRORS 0x01C
+#define ESI_TX_CLK_COUNT 0x020
+#define ESI_RX_CLK_COUNT 0x024
+#define ESI_ACLK_COUNT   0x028
+#define ESI_LINK_DROPS   0x02C
+#define ESI_ID_WORD      0x45534931
+#define ESI_ST_XCVR_READY (1u << 5)
+#define ESI_ST_LINK_READY (1u << 7)
+#define ESI_ST_SNAP_BUSY  (1u << 8)
+#define ESI_CTL_SNAPSHOT  (1u << 7)
+#define ESI_CTL_KEEP_MASK 0x71u  /* link reset + loopback mode survive a control write */
 
 #define FRAME_SOFTS      2144    /* soft bits per frame (sync + payload) = bytes per RX transfer */
 #define RX_AHEAD         2       /* receive transfers kept outstanding (see the arming loop) */
@@ -176,26 +208,90 @@ static void readbacks(volatile uint32_t *ch, volatile uint32_t *dm)
            (double)clk / 16777216.0 / 11.5314 * 1e6);
 }
 
+/* ---- the ESIstream link (tier 2) ------------------------------------- */
+static const char *esi_status_bits[] = {
+    "gt_powergood", "lcpll_lock", "tx_resetdone", "rx_resetdone", "gt_link_status",
+    "xcvr_ready", "lanes_ready", "link_ready", "snapshot_busy", "tx_clk_alive", "rx_clk_alive"
+};
+
+/* /dev/uio1 map0 when the tier-2 image is loaded, NULL on a tier-1 image */
+static volatile uint32_t *open_esi_link(void)
+{
+    int fd = open("/dev/uio1", O_RDWR | O_SYNC);
+    if (fd < 0) return NULL;
+    volatile uint32_t *esi = map_uio(fd, 0, 0x10000);
+    if (!esi) return NULL;
+    if (rd(esi, ESI_ID) != ESI_ID_WORD) {
+        fprintf(stderr, "warning: /dev/uio1 ID 0x%08X is not the ESIstream link (0x%08X); ignoring it\n",
+                rd(esi, ESI_ID), ESI_ID_WORD);
+        return NULL;
+    }
+    return esi;
+}
+
+/* latch the link-domain counters (they run at 156.25 MHz; a direct read could tear) */
+static int esi_snapshot(volatile uint32_t *esi)
+{
+    wr(esi, ESI_CONTROL, (rd(esi, ESI_CONTROL) & ESI_CTL_KEEP_MASK) | ESI_CTL_SNAPSHOT);
+    for (int i = 0; i < 1000; i++)
+        if (!(rd(esi, ESI_STATUS) & ESI_ST_SNAP_BUSY)) return 0;
+    fprintf(stderr, "ESIstream link: snapshot never completed -- a link clock is not running\n");
+    return -1;
+}
+
+/* status line, counters, and (with the ratio) whether the GT reference clock is 156.25 MHz */
+static int esi_report(volatile uint32_t *esi, int with_ratio)
+{
+    uint32_t st = rd(esi, ESI_STATUS), ctl = rd(esi, ESI_CONTROL);
+    printf("ESI_STATUS 0x%08X  CONTROL 0x%08X  (loopback mode %u)\n", st, ctl, (ctl >> 4) & 7);
+    printf("  ");
+    for (unsigned b = 0; b < sizeof esi_status_bits / sizeof *esi_status_bits; b++)
+        printf("%s=%u ", esi_status_bits[b], (st >> b) & 1);
+    printf("\n");
+    if (esi_snapshot(esi) < 0) return -1;
+    uint32_t sent = rd(esi, ESI_SAMPLES_SENT), rcvd = rd(esi, ESI_SAMPLES_RCVD);
+    uint32_t e1 = rd(esi, ESI_SEQ_ERRORS), e2 = rd(esi, ESI_MARKER_ERRORS), e3 = rd(esi, ESI_MULTI_ERRORS);
+    printf("ESI_SAMPLES_SENT %u  ESI_SAMPLES_RCVD %u  %s\n", sent, rcvd, sent == rcvd ? "(equal)" : "(NOT EQUAL)");
+    printf("ESI_SEQ_ERRORS %u  ESI_MARKER_ERRORS %u  ESI_MULTI_ERRORS %u  ESI_LINK_DROPS %u\n",
+           e1, e2, e3, rd(esi, ESI_LINK_DROPS));
+    if (with_ratio) {
+        uint32_t t1 = rd(esi, ESI_TX_CLK_COUNT), a1 = rd(esi, ESI_ACLK_COUNT);
+        usleep(200000);
+        if (esi_snapshot(esi) < 0) return -1;
+        uint32_t dt = rd(esi, ESI_TX_CLK_COUNT) - t1, da = rd(esi, ESI_ACLK_COUNT) - a1;
+        printf("tx_clk / PL clock over %u PL clocks = %.4f  (156.25 MHz / 100 MHz = 1.5625; 1.0000 = SI570 still at 100 MHz)\n",
+               da, da ? (double)dt / (double)da : 0.0);
+    }
+    return (st & ESI_ST_LINK_READY) ? 0 : 1;
+}
+
 static int usage(const char *a)
 {
-    fprintf(stderr, "usage: %s -i stim.bin -o soft.bin [-f max_frames] [-L rx_bytes] [-q] [-v]\n", a);
+    fprintf(stderr, "usage: %s -i stim.bin -o soft.bin [-f max_frames] [-L rx_bytes] [-q] [-v]\n"
+                    "       %s -l            (tier 2: ESIstream link status and counters only)\n", a, a);
     return 1;
 }
 
 int main(int argc, char **argv)
 {
     const char *in_path = NULL, *out_path = NULL;
-    int max_frames = 0, want_readbacks = 0, opt;
-    while ((opt = getopt(argc, argv, "i:o:f:L:qv")) != -1) {
+    int max_frames = 0, want_readbacks = 0, link_only = 0, opt;
+    while ((opt = getopt(argc, argv, "i:o:f:L:lqv")) != -1) {
         switch (opt) {
         case 'i': in_path = optarg; break;
         case 'o': out_path = optarg; break;
         case 'f': max_frames = atoi(optarg); break;
         case 'L': rx_bytes = (unsigned)strtoul(optarg, NULL, 0); break;
+        case 'l': link_only = 1; break;
         case 'q': want_readbacks = 1; break;
         case 'v': verbose = 1; break;
         default: return usage(argv[0]);
         }
+    }
+    if (link_only) {
+        volatile uint32_t *esi = open_esi_link();
+        if (!esi) { fprintf(stderr, "no ESIstream link block (/dev/uio1): tier-1 image?\n"); return 1; }
+        return esi_report(esi, 1) == 0 ? 0 : 1;
     }
     if (!in_path || !out_path) return usage(argv[0]);
     if (rx_bytes == 0 || rx_bytes > BUFFER_SIZE) {
@@ -225,6 +321,17 @@ int main(int argc, char **argv)
     if (!ch || !dm) return 1;
     if (rd(ch, CH_VERSION) != 0x00010000)
         fprintf(stderr, "warning: channelizer VERSION 0x%08X (expected 0x00010000)\n", rd(ch, CH_VERSION));
+    /* tier 2: the samples go through the link; it must be up before we queue any */
+    volatile uint32_t *esi = open_esi_link();
+    if (esi) {
+        uint32_t st = rd(esi, ESI_STATUS);
+        fprintf(stderr, "ESIstream link present (tier 2): STATUS 0x%08X\n", st);
+        if (!(st & ESI_ST_LINK_READY)) {
+            fprintf(stderr, "ESIstream link is not ready (xcvr_ready=%u link_ready=0); see opv_play -l\n",
+                    (st & ESI_ST_XCVR_READY) ? 1u : 0u);
+            return 1;
+        }
+    }
 
     /* ---- DMA rings ---- */
     int tx_fd = open("/dev/dma_proxy_tx", O_RDWR);
@@ -315,6 +422,13 @@ int main(int argc, char **argv)
     double secs = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
     fprintf(stderr, "%d frames (%d soft bits) in %.2f s (includes the %d ms end-of-run timeout)\n",
             frames, frames * (int)rx_bytes, secs, RX_IDLE_MS);
-    if (want_readbacks) readbacks(ch, dm);
+    if (want_readbacks) {
+        readbacks(ch, dm);
+        if (esi) {
+            esi_report(esi, 0);
+            printf("tier 2 pass: the tier-1 grade, and SAMPLES_SENT = SAMPLES_RCVD = %zu, all error counters 0\n",
+                   in_bytes / 4);
+        }
+    }
     return 0;
 }
