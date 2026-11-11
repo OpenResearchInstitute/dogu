@@ -49,9 +49,11 @@
  *       the end -- and the ESIstream link's scoreboard when the link is there
  *   -l  tier 2: print the ESIstream link status and counters, then exit
  *   -r  tier 2: pulse the transceiver reset first, wait for it, then as -l.
- *       Needed once per boot when the GT reference clock is programmed by
- *       Linux (the SI570 node in the device tree) after the fabric's own
- *       power-up reset ran against the oscillator's 100 MHz default.
+ *       Was needed once per boot with the first tier-2 image (the fabric's
+ *       power-up reset ran before Linux programmed the SI570); the link
+ *       block now resets the transceiver itself when its reference clock
+ *       becomes good (REFCLK_GOOD_EVENTS counts those), so -r is a manual
+ *       override, kept for experiments.
  *   -v  trace each DMA step
  *
  * Exit status 0 on a clean run, 1 on a usage/IO error, 2 on a DMA error.
@@ -132,6 +134,8 @@
 #define ESI_RX_CLK_COUNT 0x024
 #define ESI_ACLK_COUNT   0x028
 #define ESI_LINK_DROPS   0x02C
+#define ESI_REFCLK_PERIOD 0x030  /* PL clocks per 1024 reference clocks: 655 at 156.25 MHz, 1024 at 100 MHz, 4095 dead */
+#define ESI_REFCLK_GOOD_EVENTS 0x034  /* automatic transceiver resets (one per "reference clock became good") */
 #define ESI_ID_WORD      0x45534931
 #define ESI_ST_XCVR_READY (1u << 5)
 #define ESI_ST_LINK_READY (1u << 7)
@@ -242,7 +246,8 @@ static void readbacks(volatile uint32_t *ch, volatile uint32_t *dm)
 /* ---- the ESIstream link (tier 2) ------------------------------------- */
 static const char *esi_status_bits[] = {
     "gt_powergood", "lcpll_lock", "tx_resetdone", "rx_resetdone", "gt_link_status",
-    "xcvr_ready", "lanes_ready", "link_ready", "snapshot_busy", "tx_clk_alive", "rx_clk_alive"
+    "xcvr_ready", "lanes_ready", "link_ready", "snapshot_busy", "tx_clk_alive", "rx_clk_alive",
+    "refclk_valid"
 };
 
 /* the link block's map0 when the tier-2 image is loaded, NULL on a tier-1 image */
@@ -293,6 +298,12 @@ static int esi_report(volatile uint32_t *esi, int with_ratio)
     printf("ESI_SAMPLES_SENT %u  ESI_SAMPLES_RCVD %u  %s\n", sent, rcvd, sent == rcvd ? "(equal)" : "(NOT EQUAL)");
     printf("ESI_SEQ_ERRORS %u  ESI_MARKER_ERRORS %u  ESI_MULTI_ERRORS %u  ESI_LINK_DROPS %u\n",
            e1, e2, e3, rd(esi, ESI_LINK_DROPS));
+    uint32_t per = rd(esi, ESI_REFCLK_PERIOD) & 0xFFF;
+    if (per >= 4095)
+        printf("ESI_REFCLK_PERIOD %u  (no reference clock)  ESI_REFCLK_GOOD_EVENTS %u\n", per, rd(esi, ESI_REFCLK_GOOD_EVENTS));
+    else
+        printf("ESI_REFCLK_PERIOD %u  (reference clock %.2f MHz; 156.25 expected)  ESI_REFCLK_GOOD_EVENTS %u\n",
+               per, 1024.0 * 100.0 / (double)per, rd(esi, ESI_REFCLK_GOOD_EVENTS));
     if (with_ratio) {
         uint32_t t1 = rd(esi, ESI_TX_CLK_COUNT), a1 = rd(esi, ESI_ACLK_COUNT);
         usleep(200000);
