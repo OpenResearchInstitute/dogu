@@ -1,6 +1,6 @@
 # 道具 — dōgu
 
-**ORI ARM-side tooling for ADRV9001/ADRV9002 SDR builds.**
+**ORI ARM-side tooling for ADRV9001/ADRV9002 SDR and VCK190 builds.**
 
 Open Research Institute · CERN-OHL-S v2
 
@@ -9,16 +9,18 @@ Open Research Institute · CERN-OHL-S v2
 ## What is this?
 
 A collection of ARM-userspace software for ORI radios built around the
-Analog Devices ADRV9001/9002 transceiver — chip-init libraries, diagnostic
-tools, telemetry publishers, and dashboards.
+Analog Devices ADRV9001/9002 transceiver and for the VCK190 development
+board. This includes chip-init libraries, diagnostic tools, telemetry 
+publishers, loopback tests, and dashboards.
 
 Primary platform: ZCU102 + ADRV9002 (Haifuraiya mode-dynamic transponder).
+Primary platform: VCK190 (Haifuraiya mode-dynamic transponder, rad tolerant).
 Secondary platforms: any Linux-on-Zynq or Linux-on-ZynqMP target with an
-ADRV9001/9002, including custom carrier boards.
+ADRV9001/9002, or Versal 1902, including custom carrier boards.
 
-The name *dōgu* (道具) is Japanese for "tool" or "implement" — a deliberately
+The name *dōgu* (道具) is Japanese for "tool" or "implement". A deliberately
 broad container for the growing collection of pieces that support ORI's
-ADRV-based radios.
+radios.
 
 ## What's in here
 
@@ -27,7 +29,7 @@ dogu/
 ├── tools/                Standalone diagnostic / development utilities
 │   └── dma_listen/         Validate libiio + AXI-ADC DMA path
 |   └── frame_send/         Intermediate test - send frames to Interlocutor
-|   └── seam_grade/         Grade the quality of the demodulated frames
+|   └── opv_play/         Memory Loopback test for the VCK190
 ├── liboriinit/           ADRV9001/9002 init library (chip configuration
 │                         + safe-state enforcement via libiio)
 ├── frame_decoder/        A53 OPV frame decoder (opv-cxx-demod submodule):
@@ -35,6 +37,8 @@ dogu/
 ├── services/             systemd services for telemetry + observability
 │                           (Hatsuon, dvbs2-mon, kabura-mon, etc.)
 └── yocto/                Yocto recipes for packaging into PetaLinux images
+│      
+└── profiles/             ADRV9002 profiles and binary files
 ```
 
 ## Status
@@ -46,13 +50,6 @@ dogu/
   opv-decode -3 layout. Verified working on ZCU102+ADRV9002.
 - ✅ `tools/frame_send` — intermediate test tool: send frames to
   Interlocutor.
-- 🧪 `tools/seam_grade` — receiver quality grader for the periodic
-  frame-quality collapse (WP_SYMBOL_CLOCK_SLIP). Merges the dma_listen
-  arrival timeline with opv-decode -3 FEC metrics to classify every
-  40 ms slot OK / DEGRADED / ABSENT, measure the slip period in
-  wall-clock time, and render a PASS/FAIL verdict (`make test-seam`).
-  Rig verified end-to-end on dead air (stall watchdog, exit-code
-  taxonomy 0/1/2/3); first graded live capture pending.
 - ✅ `frame_decoder` — A53 `opv-decode` from the opv-cxx-demod submodule;
   cross-builds for aarch64, ships via `make deploy`, self-tests via
   `make test-frame-decoder`.
@@ -65,10 +62,9 @@ dogu/
   devmem → mosquitto; the dashboard is served by mosquitto's websockets
   listener at http://<target>:9001/bouro.html (no separate webserver —
   the 9001 listener does both).
-- 🚧 `services/` — placeholder; not currently load-bearing. Service
-  definitions live with their yocto recipes (see Bouro). Retained for
-  future components that need staging before recipe-ization, or retire
-  it if that never materializes.
+- ✅ `opv_play` Memory Loopback for the VCK190. Duplicates the 25 frame
+  simulation by looping the stimulus file into the receiver and then back
+  out to memory. 
 
 ## Cloning
 
@@ -94,7 +90,7 @@ make clean                        # clean all subdirectories
 make help                         # print available targets + variables
 ```
 
-The full bring-it-fresh-to-the-board sequence is three commands:
+The full bring-it-fresh-to-the-board for the ADRV9002 sequence is three commands:
 
 ```sh
 make clean && make cross && make deploy
