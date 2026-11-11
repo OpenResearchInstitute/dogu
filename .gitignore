@@ -30,3 +30,5 @@ Thumbs.db
 
 # Logs
 *.log
+tools/opv_play/opv_play
+*.jou
