@@ -48,6 +48,10 @@
  *   -q  print the readbacks (CFO estimate, symbol clock offset, frames) at
  *       the end -- and the ESIstream link's scoreboard when the link is there
  *   -l  tier 2: print the ESIstream link status and counters, then exit
+ *   -r  tier 2: pulse the transceiver reset first, wait for it, then as -l.
+ *       Needed once per boot when the GT reference clock is programmed by
+ *       Linux (the SI570 node in the device tree) after the fabric's own
+ *       power-up reset ran against the oscillator's 100 MHz default.
  *   -v  trace each DMA step
  *
  * Exit status 0 on a clean run, 1 on a usage/IO error, 2 on a DMA error.
@@ -133,6 +137,7 @@
 #define ESI_ST_LINK_READY (1u << 7)
 #define ESI_ST_SNAP_BUSY  (1u << 8)
 #define ESI_CTL_SNAPSHOT  (1u << 7)
+#define ESI_CTL_GT_RESET  (1u << 3)
 #define ESI_CTL_KEEP_MASK 0x71u  /* link reset + loopback mode survive a control write */
 
 #define FRAME_SOFTS      2144    /* soft bits per frame (sync + payload) = bytes per RX transfer */
@@ -265,6 +270,14 @@ static int esi_snapshot(volatile uint32_t *esi)
     return -1;
 }
 
+/* pulse the bridge's gtreset_in (8 PL clocks, stretched in the block), keep the loopback mode */
+static void esi_gt_reset(volatile uint32_t *esi)
+{
+    wr(esi, ESI_CONTROL, (rd(esi, ESI_CONTROL) & ESI_CTL_KEEP_MASK) | ESI_CTL_GT_RESET);
+    printf("transceiver reset pulsed; waiting 500 ms for the bridge's reset sequence\n");
+    usleep(500000);
+}
+
 /* status line, counters, and (with the ratio) whether the GT reference clock is 156.25 MHz */
 static int esi_report(volatile uint32_t *esi, int with_ratio)
 {
@@ -294,21 +307,23 @@ static int esi_report(volatile uint32_t *esi, int with_ratio)
 static int usage(const char *a)
 {
     fprintf(stderr, "usage: %s -i stim.bin -o soft.bin [-f max_frames] [-L rx_bytes] [-q] [-v]\n"
-                    "       %s -l            (tier 2: ESIstream link status and counters only)\n", a, a);
+                    "       %s -l            (tier 2: ESIstream link status and counters only)\n"
+                    "       %s -r            (tier 2: pulse the transceiver reset, then as -l)\n", a, a, a);
     return 1;
 }
 
 int main(int argc, char **argv)
 {
     const char *in_path = NULL, *out_path = NULL;
-    int max_frames = 0, want_readbacks = 0, link_only = 0, opt;
-    while ((opt = getopt(argc, argv, "i:o:f:L:lqv")) != -1) {
+    int max_frames = 0, want_readbacks = 0, link_only = 0, gt_reset = 0, opt;
+    while ((opt = getopt(argc, argv, "i:o:f:L:lqrv")) != -1) {
         switch (opt) {
         case 'i': in_path = optarg; break;
         case 'o': out_path = optarg; break;
         case 'f': max_frames = atoi(optarg); break;
         case 'L': rx_bytes = (unsigned)strtoul(optarg, NULL, 0); break;
         case 'l': link_only = 1; break;
+        case 'r': link_only = 1; gt_reset = 1; break;
         case 'q': want_readbacks = 1; break;
         case 'v': verbose = 1; break;
         default: return usage(argv[0]);
@@ -317,6 +332,7 @@ int main(int argc, char **argv)
     if (link_only) {
         volatile uint32_t *esi = open_esi_link();
         if (!esi) { fprintf(stderr, "no UIO device named esi_link_hw: tier-1 image?\n"); return 1; }
+        if (gt_reset) esi_gt_reset(esi);
         return esi_report(esi, 1) == 0 ? 0 : 1;
     }
     if (!in_path || !out_path) return usage(argv[0]);

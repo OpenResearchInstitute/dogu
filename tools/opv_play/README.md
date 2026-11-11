@@ -33,7 +33,10 @@ the link's own scoreboard: samples sent and received through the link and
 its three error counters. `opv_play -l` reads the link without playing
 (status bits, counters, and the transceiver clock measured against the PL
 clock -- 1.5625 when the board's SI570 has been set to 156.25 MHz, 1.0000
-when it is still at its power-up 100 MHz). Pass for tier 2 = the tier-1
+when it is still at its power-up 100 MHz). `opv_play -r` pulses the
+transceiver reset first and then reports: needed once per boot, because the
+fabric's own power-up reset of the transceiver runs before Linux programs
+the oscillator. Pass for tier 2 = the tier-1
 table, SAMPLES_SENT = SAMPLES_RCVD = the stimulus length, all error
 counters 0. Register map: `haifuraiya/platforms/vck190/rtl/esi/esi_link_hw.vhd`.
 
