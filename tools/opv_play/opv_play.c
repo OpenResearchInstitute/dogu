@@ -55,6 +55,9 @@
  *       becomes good (REFCLK_GOOD_EVENTS counts those), so -r is a manual
  *       override, kept for experiments.
  *   -v  trace each DMA step
+ *   -w  play even if the receiver is warm (FRAMES_RECEIVED != 0).  Without it
+ *       opv_play refuses: it does not reset the receiver, and a run on a warm
+ *       receiver is not the same test (and gave 0 frames, 2026-11-11).
  *
  * Exit status 0 on a clean run, 1 on a usage/IO error, 2 on a DMA error.
  *
@@ -317,7 +320,7 @@ static int esi_report(volatile uint32_t *esi, int with_ratio)
 
 static int usage(const char *a)
 {
-    fprintf(stderr, "usage: %s -i stim.bin -o soft.bin [-f max_frames] [-L rx_bytes] [-q] [-v]\n"
+    fprintf(stderr, "usage: %s -i stim.bin -o soft.bin [-f max_frames] [-L rx_bytes] [-q] [-v] [-w]\n"
                     "       %s -l            (tier 2: ESIstream link status and counters only)\n"
                     "       %s -r            (tier 2: pulse the transceiver reset, then as -l)\n", a, a, a);
     return 1;
@@ -326,8 +329,8 @@ static int usage(const char *a)
 int main(int argc, char **argv)
 {
     const char *in_path = NULL, *out_path = NULL;
-    int max_frames = 0, want_readbacks = 0, link_only = 0, gt_reset = 0, opt;
-    while ((opt = getopt(argc, argv, "i:o:f:L:lqrv")) != -1) {
+    int max_frames = 0, want_readbacks = 0, link_only = 0, gt_reset = 0, allow_warm = 0, opt;
+    while ((opt = getopt(argc, argv, "i:o:f:L:lqrvw")) != -1) {
         switch (opt) {
         case 'i': in_path = optarg; break;
         case 'o': out_path = optarg; break;
@@ -335,6 +338,7 @@ int main(int argc, char **argv)
         case 'L': rx_bytes = (unsigned)strtoul(optarg, NULL, 0); break;
         case 'l': link_only = 1; break;
         case 'r': link_only = 1; gt_reset = 1; break;
+        case 'w': allow_warm = 1; break;
         case 'q': want_readbacks = 1; break;
         case 'v': verbose = 1; break;
         default: return usage(argv[0]);
@@ -374,6 +378,14 @@ int main(int argc, char **argv)
     if (!ch || !dm) return 1;
     if (rd(ch, CH_VERSION) != 0x00010000)
         fprintf(stderr, "warning: channelizer VERSION 0x%08X (expected 0x00010000)\n", rd(ch, CH_VERSION));
+    /* a warm receiver is not the same test: opv_play does not reset the receiver,
+     * and a second run after a run that already locked produced 0 frames
+     * (2026-11-11).  Refuse unless -w says the operator knows. */
+    if (rd(dm, DM_FRAMES_RX) != 0 && !allow_warm) {
+        fprintf(stderr, "receiver is warm: FRAMES_RECEIVED %u already -- reboot the board between runs "
+                        "(or -w to run anyway; the result is not an acceptance run)\n", rd(dm, DM_FRAMES_RX));
+        return 1;
+    }
     /* tier 2: the samples go through the link; it must be up before we queue any */
     volatile uint32_t *esi = open_esi_link();
     if (esi) {
