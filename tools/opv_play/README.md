@@ -24,7 +24,10 @@ Pass = the same per-frame table the 25-frame xsim run gives (25/25, flat).
 
 Tier 2 (digital loopback: the same samples go through the ESIstream link and
 the GTY transceiver pair between the pacer and the receiver) uses the same
-command. When the tier-2 image is loaded the link block is `/dev/uio1`;
+command. Both register blocks are found by name under `/sys/class/uio`
+(`haifuraiya_rx_axi`, `esi_link_hw`), never by number: the kernel numbers
+UIO devices in device-tree order and the link sorts before the receiver.
+When the tier-2 image is loaded the link block is present;
 `opv_play` then refuses to play until the link reports ready, and `-q` adds
 the link's own scoreboard: samples sent and received through the link and
 its three error counters. `opv_play -l` reads the link without playing

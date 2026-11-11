@@ -5,15 +5,18 @@
  *   DDR --axi_dma MM2S--> axis_sample_pacer (20 MSps) --> haifuraiya_rx_axi
  *                         --> axis_softbit_widen --axi_dma S2MM--> DDR
  *
- * Registers: /dev/uio0 (generic-uio), map0 = channelizer control block
- * (axi_lite_regs, 0xA4010000), map1 = demod control block
+ * Registers: the receiver's UIO device (generic-uio, found by name
+ * "haifuraiya_rx_axi" under /sys/class/uio -- never by number: the kernel
+ * numbers UIO devices in device-tree order, and the tier-2 image's link
+ * block sorts before the receiver, 2026-11-10), map0 = channelizer control
+ * block (axi_lite_regs, 0xA4010000), map1 = demod control block
  * (haifuraiya_demod_regs, 0xA4020000).  The bring-up sequence below is the
  * simulation bench's (tb_haifuraiya_channelizer_axi.vhd, Phase 2), register
  * for register, so the board gets the configuration the acceptance run gets.
  *
  * Tier 2 (digital loopback): the ESIstream link block (esi_link_hw,
- * 0xA4030000) sits between the pacer and the receiver and is /dev/uio1,
- * map0.  When it is present, opv_play refuses to play until the link
+ * 0xA4030000) sits between the pacer and the receiver and is the UIO device
+ * named "esi_link_hw", map0.  When it is present, opv_play refuses to play until the link
  * reports ready and prints the link's own scoreboard with the readbacks:
  * samples sent and received through the link and the three error counters.
  * Pass for tier 2 = the tier-1 grade AND sent = received = the stimulus
@@ -111,7 +114,7 @@
 #define DM_SYM_CLK_OFF   0x0CC
 #define DM_SOFT_DROPPED  0x0D0
 
-/* ESIstream link block (esi_link_hw.vhd), tier 2 only, /dev/uio1 map0 */
+/* ESIstream link block (esi_link_hw.vhd), tier 2 only, UIO "esi_link_hw" map0 */
 #define ESI_ID           0x000   /* 0x45534931 "ESI1" */
 #define ESI_CONTROL      0x004   /* bit0 link reset, bit1 sync req, bit2 stats clear, bit3 GT reset,
                                     bits 6:4 loopback mode, bit7 snapshot (pulse bits read 0) */
@@ -138,6 +141,29 @@
 
 static int verbose = 0;
 static unsigned rx_bytes = FRAME_SOFTS;   /* -L */
+
+/* open the UIO device whose /sys/class/uio/uioN/name matches; -1 if none */
+static int open_uio_by_name(const char *name)
+{
+    char path[64], buf[64];
+    for (int n = 0; n < 16; n++) {
+        snprintf(path, sizeof path, "/sys/class/uio/uio%d/name", n);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        buf[0] = 0;
+        if (!fgets(buf, sizeof buf, f)) buf[0] = 0;
+        fclose(f);
+        buf[strcspn(buf, "\n")] = 0;
+        if (strcmp(buf, name) == 0) {
+            snprintf(path, sizeof path, "/dev/uio%d", n);
+            int fd = open(path, O_RDWR | O_SYNC);
+            if (fd < 0) perror(path);
+            else if (verbose) fprintf(stderr, "%s is %s\n", name, path);
+            return fd;
+        }
+    }
+    return -1;
+}
 
 static volatile uint32_t *map_uio(int fd, int map, size_t len)
 {
@@ -214,15 +240,15 @@ static const char *esi_status_bits[] = {
     "xcvr_ready", "lanes_ready", "link_ready", "snapshot_busy", "tx_clk_alive", "rx_clk_alive"
 };
 
-/* /dev/uio1 map0 when the tier-2 image is loaded, NULL on a tier-1 image */
+/* the link block's map0 when the tier-2 image is loaded, NULL on a tier-1 image */
 static volatile uint32_t *open_esi_link(void)
 {
-    int fd = open("/dev/uio1", O_RDWR | O_SYNC);
+    int fd = open_uio_by_name("esi_link_hw");
     if (fd < 0) return NULL;
     volatile uint32_t *esi = map_uio(fd, 0, 0x10000);
     if (!esi) return NULL;
     if (rd(esi, ESI_ID) != ESI_ID_WORD) {
-        fprintf(stderr, "warning: /dev/uio1 ID 0x%08X is not the ESIstream link (0x%08X); ignoring it\n",
+        fprintf(stderr, "warning: esi_link_hw ID 0x%08X is not the ESIstream link (0x%08X); ignoring it\n",
                 rd(esi, ESI_ID), ESI_ID_WORD);
         return NULL;
     }
@@ -290,7 +316,7 @@ int main(int argc, char **argv)
     }
     if (link_only) {
         volatile uint32_t *esi = open_esi_link();
-        if (!esi) { fprintf(stderr, "no ESIstream link block (/dev/uio1): tier-1 image?\n"); return 1; }
+        if (!esi) { fprintf(stderr, "no UIO device named esi_link_hw: tier-1 image?\n"); return 1; }
         return esi_report(esi, 1) == 0 ? 0 : 1;
     }
     if (!in_path || !out_path) return usage(argv[0]);
@@ -314,8 +340,8 @@ int main(int argc, char **argv)
             in_bytes, in_bytes / 4, (double)(in_bytes / 4) / 20e6, n_tx);
 
     /* ---- registers ---- */
-    int uio = open("/dev/uio0", O_RDWR | O_SYNC);
-    if (uio < 0) { perror("/dev/uio0"); return 1; }
+    int uio = open_uio_by_name("haifuraiya_rx_axi");
+    if (uio < 0) { fprintf(stderr, "no UIO device named haifuraiya_rx_axi (ls /sys/class/uio/*/name)\n"); return 1; }
     volatile uint32_t *ch = map_uio(uio, 0, 0x10000);
     volatile uint32_t *dm = map_uio(uio, 1, 0x10000);
     if (!ch || !dm) return 1;
